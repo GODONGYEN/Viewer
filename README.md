@@ -10,6 +10,7 @@ The long-term direction is a TV Cast Controller. When a TV is detected, the app 
 
 - Host and Viewer modes
 - OS-mediated screen capture through `getDisplayMedia`
+- Electron screen capture compatibility layer with desktopCapturer fallback
 - WebRTC video sharing with Viewer as `recvonly`
 - Built-in WebSocket signaling server
 - UDP broadcast LAN discovery
@@ -157,10 +158,12 @@ If a Chromecast or Google TV-like device is detected, the app uses a built-in Ca
 The screen stream flow is:
 
 1. User clicks `Chromecast 화면 스트림 시작`.
-2. The renderer calls `getDisplayMedia` after the user action.
-3. `MediaRecorder` encodes WebM chunks.
-4. The main process serves either a WebM chunked stream or an HLS playlist through the LAN HTTP stream server.
-5. Chromecast receives a `LOAD` request with `streamType: LIVE`.
+2. The renderer first calls `getDisplayMedia({ video: true, audio: false })` after the user action.
+3. If that is not supported in the current Electron/Chromium runtime, the app asks the main process for `desktopCapturer` screen/window sources and shows an in-app source picker.
+4. The user explicitly selects a screen/window, then the renderer starts `getUserMedia` with that source ID.
+5. `MediaRecorder` encodes WebM chunks.
+6. The main process serves either a WebM chunked stream or an HLS playlist through the LAN HTTP stream server.
+7. Chromecast receives a `LOAD` request with `streamType: LIVE`.
 
 Default options are `720p`, `15fps`, `2 Mbps`, and `Auto(HLS first)`. Auto starts HLS and WebM sessions from the same user-approved capture, waits for the HLS playlist and first segment before sending Chromecast `LOAD`, and falls back to WebM if the HLS strategy fails. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility, with a few seconds of latency.
 
@@ -178,7 +181,7 @@ Miracast is mainly a Windows wireless display path. This app may show a Miracast
 - DLNA: experimental media file playback through local HTTP + AVTransport SOAP with DIDL-Lite metadata and HTTP Range support.
 - AirPlay: macOS connection flow launcher; user must select the TV and approve codes.
 - Miracast: Windows Wireless Display settings launcher; user must select the TV.
-- Screen stream casting: explicit user-triggered `getDisplayMedia` + MediaRecorder WebM chunks + optional ffmpeg HLS fallback; no DRM/protected content bypass.
+- Screen stream casting: explicit user-triggered `getDisplayMedia` or user-selected Electron `desktopCapturer` fallback + MediaRecorder WebM chunks + optional ffmpeg HLS fallback; no DRM/protected content bypass.
 
 ## LAN Discovery
 
@@ -225,6 +228,8 @@ macOS requires explicit Screen Recording permission. If capture fails:
 5. Restart the app if macOS asks for it.
 
 The app does not bypass this permission.
+
+During Chromecast screen streaming, a `Not supported` capture error usually means the current Electron renderer cannot use the default `getDisplayMedia` path or rejected the constraints. The app now retries through an Electron source picker. If that picker also fails on macOS, open Screen Recording settings from the app, allow Electron or the packaged app, and restart.
 
 ## Troubleshooting
 

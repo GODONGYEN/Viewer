@@ -141,6 +141,20 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 12. WebM 단독 테스트는 방식 옵션을 `WebM live`로 바꾸고 다시 시도합니다.
 13. `화면 스트림 중지` 또는 `Cast 중지`를 눌렀을 때 캡처, MediaRecorder, stream server, Chromecast STOP이 정리되는지 확인합니다.
 
+### Electron 화면 캡처 fallback 테스트
+
+`화면 캡처 시작 실패: Not supported`가 나던 환경에서는 다음 흐름을 확인합니다.
+
+1. TV Cast 모드에서 Chromecast/Google TV를 선택합니다.
+2. `Chromecast 화면 스트림 시작`을 누릅니다.
+3. 앱이 먼저 단순한 `getDisplayMedia({ video: true, audio: false })` 경로를 시도하는지 확인합니다.
+4. 기본 경로가 실패하면 `기본 화면 캡처가 지원되지 않아 Electron 화면 선택 방식으로 전환합니다.` 메시지와 화면/창 선택 모달이 뜨는지 확인합니다.
+5. 모달에서 화면 또는 창 썸네일을 직접 선택합니다.
+6. preview 영역에 선택한 화면이 표시되는지 확인합니다.
+7. 타임라인에 `화면 캡처 성공: getDisplayMedia` 또는 `화면 캡처 성공: Electron desktopCapturer`가 기록되는지 확인합니다.
+8. macOS에서 fallback도 실패하면 `macOS 화면 기록 권한 열기`를 누르고 Screen Recording 권한을 허용한 뒤 앱을 재시작합니다.
+9. 캡처 성공 후 HLS/WebM stream URL 생성과 Chromecast `LOAD`가 이어지는지 확인합니다.
+
 ### DLNA TV 테스트
 
 1. TV의 DLNA/UPnP Media Renderer 기능을 켭니다.

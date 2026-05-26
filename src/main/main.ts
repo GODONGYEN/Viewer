@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session } from "electron";
+import { app, BrowserWindow, desktopCapturer, ipcMain, session, shell } from "electron";
 import path from "node:path";
 import { setupDiscoveryIpc, stopDiscovery } from "./discovery";
 import { RunningSignalingServer, startSignalingServer } from "./signaling";
@@ -42,6 +42,21 @@ function createWindow(mode?: "host" | "viewer" | "tv") {
     const allowedPermissions = new Set(["media", "display-capture"]);
     callback(allowedPermissions.has(permission));
   });
+
+  session.defaultSession.setDisplayMediaRequestHandler(
+    (request, callback) => {
+      if (!request.userGesture) {
+        callback({});
+        return;
+      }
+
+      // Prefer Electron/Chromium's native picker when available. If it is not
+      // available, keep this handler consent-safe by not auto-selecting a source;
+      // the renderer opens our explicit desktopCapturer picker as a fallback.
+      callback({});
+    },
+    { useSystemPicker: true }
+  );
 
   setupDiscoveryIpc(mainWindow);
   setupTvDiscoveryIpc(mainWindow);
@@ -94,6 +109,34 @@ app.whenReady().then(async () => {
     createWindow("viewer");
     return { ok: true };
   });
+  ipcMain.handle("screen-capture:get-sources", async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ["screen", "window"],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: false
+    });
+
+    return sources.map((source) => ({
+      id: source.id,
+      name: source.name,
+      displayId: source.display_id,
+      thumbnailDataUrl: source.thumbnail.isEmpty() ? undefined : source.thumbnail.toDataURL()
+    }));
+  });
+  ipcMain.handle("screen-capture:open-screen-recording-settings", async () => {
+    if (process.platform !== "darwin") {
+      return { ok: false, message: "화면 기록 권한 설정은 macOS에서만 열 수 있습니다." };
+    }
+
+    await shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
+    return { ok: true };
+  });
+  ipcMain.handle("screen-capture:get-environment-info", () => ({
+    platform: process.platform,
+    isElectron: true,
+    electronVersion: process.versions.electron,
+    chromeVersion: process.versions.chrome
+  }));
 
   await startInternalSignaling();
 
