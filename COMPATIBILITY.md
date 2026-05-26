@@ -4,9 +4,9 @@ Use this file to record real TV test results. Do not include private Wi-Fi passw
 
 ## Template
 
-| Vendor | Model | Firmware | Detection | Protocols | Default Receiver | Chromecast LOAD | WebM Stream | HLS Stream | Preset | Latency | ffmpeg Speed | CPU/Heat | Quality | DLNA Play | AirPlay Flow | Miracast Flow | Failure Log | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Example | Example TV | 1.0.0 | mDNS + SSDP | Chromecast, DLNA | Unknown | Unknown | Unknown | Unknown | Low Latency | Unknown | Unknown | Warm/OK | 720p/15fps/2Mbps | Unknown | N/A | N/A | Paste timeline summary | Same Wi-Fi, no guest network |
+| Vendor | Model | Firmware | Detection | Protocols | Custom Receiver Launch | WebRTC ICE | WebRTC Latency | Default Receiver | Chromecast LOAD | WebM Stream | HLS Stream | HLS Latency | Preset | ffmpeg Speed | CPU/Heat | Quality | DLNA Play | AirPlay Flow | Miracast Flow | Failure Log | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Example | Example TV | 1.0.0 | mDNS + SSDP | Chromecast, DLNA | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Low Latency | Unknown | Warm/OK | 720p/15fps/2Mbps | Unknown | N/A | N/A | Paste timeline summary | Same Wi-Fi, no guest network |
 
 ## What To Record
 
@@ -15,6 +15,9 @@ Use this file to record real TV test results. Do not include private Wi-Fi passw
 - Detection method: mDNS, SSDP, or both
 - Protocol badges shown by the app
 - Chromecast Default Media Receiver launch result
+- Custom Web Receiver launch result
+- WebRTC ICE connected result
+- WebRTC latency estimate or visual stopwatch latency
 - Chromecast media LOAD result
 - Chromecast WebM screen stream result
 - Chromecast HLS screen stream result

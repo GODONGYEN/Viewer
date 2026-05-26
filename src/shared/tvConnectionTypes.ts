@@ -7,6 +7,7 @@ export type TVConnectionAction =
   | "connect"
   | "cast-test-media"
   | "start-screen-cast-experiment"
+  | "start-webrtc-screen-cast"
   | "play-dlna-media"
   | "airplay-start"
   | "miracast-start";
@@ -44,6 +45,8 @@ export type TVConnectionOptions = {
   mediaFilePath?: string;
   contentType?: string;
   streamType?: "BUFFERED" | "LIVE";
+  screenStreamMode?: "auto" | "webrtc-low-latency" | "hls-stable";
+  customReceiverAppId?: string;
   screenStreamStrategy?: "auto" | "webm" | "hls";
   screenStreamOptions?: ScreenStreamOptions;
   screenStreamSources?: ScreenStreamSource[];

@@ -1,0 +1,29 @@
+html,
+body,
+main {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+  color: #eef6ff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+#status {
+  position: fixed;
+  left: 24px;
+  bottom: 20px;
+  border-radius: 6px;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.64);
+  font-size: 18px;
+  font-weight: 700;
+}

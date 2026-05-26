@@ -43,6 +43,10 @@ function getInitialMode(): Mode {
   return mode === "host" || mode === "viewer" || mode === "tv" ? mode : "home";
 }
 
+function getInitialCustomReceiverAppId() {
+  return localStorage.getItem("customReceiverAppId") ?? import.meta.env.VITE_CAST_CUSTOM_RECEIVER_APP_ID ?? "";
+}
+
 function toWebSocketUrl(input: string, fallbackPort = SIGNALING_PORT) {
   const trimmed = input.trim();
   const withScheme = /^[a-z]+:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
@@ -177,6 +181,10 @@ export default function App() {
   const [showDlnaExperiment, setShowDlnaExperiment] = useState(false);
   const [tvConnectionEvents, setTvConnectionEvents] = useState<TVConnectionEvent[]>([]);
   const [activeTvConnectionId, setActiveTvConnectionId] = useState<string>("");
+  const [screenStreamMode, setScreenStreamMode] = useState<"auto" | "webrtc-low-latency" | "hls-stable">("auto");
+  const [customReceiverAppId, setCustomReceiverAppId] = useState(() => getInitialCustomReceiverAppId());
+  const [webRtcCastStatus, setWebRtcCastStatus] = useState("대기 중");
+  const [webRtcRttMs, setWebRtcRttMs] = useState<number | null>(null);
   const [screenStreamOptions, setScreenStreamOptions] = useState<ScreenStreamOptions>({ strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2 });
   const [screenPreviewActive, setScreenPreviewActive] = useState(false);
   const [lastScreenStreamSources, setLastScreenStreamSources] = useState<ScreenStreamSource[]>([]);
@@ -199,6 +207,10 @@ export default function App() {
   const tvScreenRecorderRef = useRef<MediaRecorder | null>(null);
   const tvScreenStreamRef = useRef<MediaStream | null>(null);
   const tvScreenStreamIdsRef = useRef<string[]>([]);
+  const tvWebRtcPeerRef = useRef<RTCPeerConnection | null>(null);
+  const tvWebRtcConnectionIdRef = useRef("");
+  const tvWebRtcFallbackRef = useRef<{ device: TVDevice; options: ScreenStreamOptions; attempted: boolean } | null>(null);
+  const webRtcPingTimerRef = useRef<number | null>(null);
   const screenStreamMetricsRef = useRef({ captureStartedAt: 0, firstChunkAt: 0, lastChunkAt: 0, chunkCount: 0, totalChunkBytes: 0, emptyChunks: 0 });
   const captureSourceResolverRef = useRef<((source: ScreenCaptureSource | null) => void) | null>(null);
 
@@ -273,6 +285,10 @@ export default function App() {
       setCaptureEnvironmentInfo(null);
     });
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("customReceiverAppId", customReceiverAppId.trim());
+  }, [customReceiverAppId]);
 
   useEffect(() => {
     if (mode === "host" && !hostSocketRef.current) {
@@ -368,6 +384,7 @@ export default function App() {
     const unsubscribeConnection = window.tvConnection?.onConnectionEvent((event) => {
       setTvConnectionEvents((current) => [event, ...current].slice(0, 80));
       addLog(`TV 연결: ${event.connector} / ${event.status} / ${event.step}`);
+      void handleTvConnectionEvent(event);
     });
     const unsubscribeDevice = window.tvDiscovery?.onTvDeviceFound((device) => {
       const key = getDeviceMergeKey(device);
@@ -1036,7 +1053,12 @@ export default function App() {
     setTvActionMessage(action.description);
   }
 
-  async function startTvConnection(device: TVDevice, action: TVConnectionAction = "connect", streamOptions: ScreenStreamOptions = screenStreamOptions) {
+  async function startTvConnection(
+    device: TVDevice,
+    action: TVConnectionAction = "connect",
+    streamOptions: ScreenStreamOptions = screenStreamOptions,
+    modeOverride: "auto" | "webrtc-low-latency" | "hls-stable" = screenStreamMode
+  ) {
     let mediaFilePath: string | undefined;
     let testMediaUrl: string | undefined;
     let contentType: string | undefined;
@@ -1054,6 +1076,13 @@ export default function App() {
     }
 
     if (action === "start-screen-cast-experiment") {
+      if (modeOverride !== "hls-stable") {
+        const startedWebRtc = await startChromecastWebRtcScreenStream(device, streamOptions, modeOverride);
+        if (startedWebRtc) return;
+        if (modeOverride === "webrtc-low-latency") return;
+        setTvActionMessage("Low Latency WebRTC 시작 조건을 충족하지 못해 Stable HLS fallback으로 전환합니다.");
+      }
+
       const screenStream = await startChromecastScreenStream(device, streamOptions);
       if (!screenStream) return;
       screenStreamSources = screenStream.sources;
@@ -1065,7 +1094,7 @@ export default function App() {
 
     const response = await window.tvConnection?.connectToTv({
       device,
-      options: { action, mediaFilePath, testMediaUrl, contentType, streamType, screenStreamStrategy: streamOptions.strategy, screenStreamOptions: streamOptions, screenStreamSources }
+      options: { action, mediaFilePath, testMediaUrl, contentType, streamType, screenStreamMode: modeOverride, screenStreamStrategy: streamOptions.strategy, screenStreamOptions: streamOptions, screenStreamSources }
     });
     if (!response?.ok || !response.connectionId) {
       setTvActionMessage(response?.message ?? "TV 연결 시도를 시작하지 못했습니다.");
@@ -1099,7 +1128,181 @@ export default function App() {
     };
     setScreenStreamOptions(nextOptions);
     await stopActiveTvConnection();
-    await startTvConnection(device, "start-screen-cast-experiment", nextOptions);
+    await startTvConnection(device, "start-screen-cast-experiment", nextOptions, screenStreamMode);
+  }
+
+  async function startChromecastWebRtcScreenStream(device: TVDevice, options: ScreenStreamOptions, modeOverride: "auto" | "webrtc-low-latency" | "hls-stable") {
+    const appId = customReceiverAppId.trim();
+    if (!appId) {
+      setWebRtcCastStatus("Custom Receiver App ID가 없어 WebRTC Low Latency를 시작하지 않았습니다.");
+      setTvActionMessage("WebRTC Low Latency에는 Google Cast SDK에서 등록한 Custom Receiver App ID가 필요합니다.");
+      return false;
+    }
+
+    const capture = await obtainScreenCaptureStream();
+    if (!capture) return false;
+
+    const response = await window.tvConnection?.connectToTv({
+      device,
+      options: {
+        action: "start-webrtc-screen-cast",
+        screenStreamMode: modeOverride,
+        customReceiverAppId: appId,
+        screenStreamOptions: options
+      }
+    });
+
+    if (!response?.ok || !response.connectionId) {
+      stopScreenCapture(capture.stream);
+      setTvActionMessage(response?.message ?? "WebRTC Low Latency receiver 연결을 시작하지 못했습니다.");
+      return false;
+    }
+
+    setActiveTvConnectionId(response.connectionId);
+    tvWebRtcConnectionIdRef.current = response.connectionId;
+    tvWebRtcFallbackRef.current = modeOverride === "auto" ? { device, options, attempted: false } : null;
+    prepareWebRtcPeer(response.connectionId, device, capture.stream, options);
+    tvScreenStreamRef.current = capture.stream;
+    setScreenPreviewActive(true);
+    window.setTimeout(() => {
+      if (tvScreenPreviewRef.current) tvScreenPreviewRef.current.srcObject = capture.stream;
+    }, 0);
+    setWebRtcCastStatus("Custom Receiver launch 대기 중");
+    setTvActionMessage("WebRTC Low Latency receiver launch를 시작했습니다. receiver-ready 이후 offer를 전송합니다.");
+    return true;
+  }
+
+  async function testCustomReceiverLaunch(device: TVDevice) {
+    const appId = customReceiverAppId.trim();
+    if (!appId) {
+      setTvActionMessage("Receiver launch 테스트에는 Custom Receiver App ID가 필요합니다.");
+      return;
+    }
+    const response = await window.tvConnection?.connectToTv({
+      device,
+      options: { action: "start-webrtc-screen-cast", customReceiverAppId: appId, screenStreamMode: "webrtc-low-latency", screenStreamOptions }
+    });
+    if (response?.connectionId) setActiveTvConnectionId(response.connectionId);
+    setTvActionMessage(response?.ok ? "Custom Receiver launch 테스트를 시작했습니다. receiver-ready 로그를 확인하세요." : response?.message ?? "Receiver launch 테스트를 시작하지 못했습니다.");
+  }
+
+  function prepareWebRtcPeer(connectionId: string, device: TVDevice, stream: MediaStream, options: ScreenStreamOptions) {
+    tvWebRtcPeerRef.current?.close();
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    tvWebRtcPeerRef.current = pc;
+    const tuning = getScreenStreamTuning(options);
+
+    for (const track of stream.getVideoTracks()) {
+      track.contentHint = options.preset === "low-cpu" ? "detail" : "motion";
+      const sender = pc.addTrack(track, stream);
+      const params = sender.getParameters();
+      params.encodings = [
+        {
+          maxBitrate: tuning.bitrateMbps * 1_000_000,
+          maxFramerate: tuning.fps,
+          scaleResolutionDownBy: tuning.resolution === "540p" ? 1.5 : 1
+        }
+      ];
+      void sender.setParameters(params).catch(() => undefined);
+    }
+
+    pc.onicecandidate = (event) => {
+      void window.tvConnection?.sendWebRtcSignal({
+        connectionId,
+        message: { type: "sender-ice", candidate: event.candidate ? event.candidate.toJSON() : null }
+      });
+    };
+    pc.onconnectionstatechange = () => {
+      setWebRtcCastStatus(`WebRTC connectionState: ${pc.connectionState}`);
+      setTvConnectionEvents((current) => [
+        {
+          connectionId,
+          deviceId: device.id,
+          connector: "diagnostic",
+          status: pc.connectionState === "connected" ? "playing" : pc.connectionState === "failed" ? "failed" : "media-loading",
+          step: "WebRTC connectionState",
+          message: pc.connectionState,
+          timestamp: Date.now()
+        },
+        ...current
+      ]);
+      if (pc.connectionState === "failed") {
+        void fallbackToStableHls("WebRTC ICE/connectionState failed");
+      }
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === "failed") {
+        void fallbackToStableHls("WebRTC ICE failed");
+      }
+    };
+  }
+
+  async function sendWebRtcOffer() {
+    const pc = tvWebRtcPeerRef.current;
+    const connectionId = tvWebRtcConnectionIdRef.current;
+    if (!pc || !connectionId || pc.localDescription) return;
+    const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
+    await pc.setLocalDescription(offer);
+    await window.tvConnection?.sendWebRtcSignal({
+      connectionId,
+      message: { type: "sender-offer", sdp: offer.sdp ?? "" }
+    });
+    setWebRtcCastStatus("WebRTC offer sent");
+  }
+
+  async function handleWebRtcReceiverSignal(event: TVConnectionEvent) {
+    if (event.connectionId !== tvWebRtcConnectionIdRef.current) return;
+    if (event.step === "receiver-ready") {
+      await sendWebRtcOffer();
+      startWebRtcStatsPing(event.connectionId);
+      return;
+    }
+    if (event.step !== "webrtc-signal" || typeof event.details?.signalJson !== "string") return;
+    const message = JSON.parse(event.details.signalJson) as Record<string, unknown>;
+    const pc = tvWebRtcPeerRef.current;
+    if (!pc) return;
+
+    if (message.type === "receiver-answer" && typeof message.sdp === "string") {
+      await pc.setRemoteDescription({ type: "answer", sdp: message.sdp });
+      setWebRtcCastStatus("WebRTC answer received");
+    }
+    if (message.type === "receiver-ice" && message.candidate) {
+      await pc.addIceCandidate(message.candidate as RTCIceCandidateInit).catch(() => undefined);
+    }
+    if (message.type === "receiver-stats") {
+      setWebRtcCastStatus(message.rendering ? "Receiver rendering" : String(message.state ?? "Receiver stats"));
+      if (typeof message.rttMs === "number") setWebRtcRttMs(message.rttMs);
+    }
+    if (message.type === "receiver-error") {
+      setWebRtcCastStatus(String(message.message ?? "Receiver error"));
+      await fallbackToStableHls(String(message.message ?? "Receiver error"));
+    }
+    if (message.type === "pong" && typeof message.timestamp === "number") {
+      setWebRtcRttMs(Date.now() - message.timestamp);
+    }
+  }
+
+  async function handleTvConnectionEvent(event: TVConnectionEvent) {
+    await handleWebRtcReceiverSignal(event);
+    if (event.connectionId === tvWebRtcConnectionIdRef.current && event.status === "failed") {
+      await fallbackToStableHls(event.message);
+    }
+  }
+
+  function startWebRtcStatsPing(connectionId: string) {
+    if (webRtcPingTimerRef.current) window.clearInterval(webRtcPingTimerRef.current);
+    webRtcPingTimerRef.current = window.setInterval(() => {
+      void window.tvConnection?.sendWebRtcSignal({ connectionId, message: { type: "ping", timestamp: Date.now() } });
+    }, 1000);
+  }
+
+  async function fallbackToStableHls(reason: string) {
+    const fallback = tvWebRtcFallbackRef.current;
+    if (!fallback || fallback.attempted) return;
+    fallback.attempted = true;
+    setTvActionMessage(`WebRTC Low Latency 실패: ${reason}. Stable HLS fallback으로 전환합니다.`);
+    await stopChromecastScreenStream();
+    await startTvConnection(fallback.device, "start-screen-cast-experiment", fallback.options, "hls-stable");
   }
 
   function resolveCaptureSource(source: ScreenCaptureSource | null) {
@@ -1311,6 +1514,14 @@ export default function App() {
   }
 
   async function stopChromecastScreenStream() {
+    if (webRtcPingTimerRef.current) {
+      window.clearInterval(webRtcPingTimerRef.current);
+      webRtcPingTimerRef.current = null;
+    }
+    tvWebRtcPeerRef.current?.close();
+    tvWebRtcPeerRef.current = null;
+    tvWebRtcConnectionIdRef.current = "";
+    setWebRtcCastStatus("중지됨");
     if (tvScreenRecorderRef.current?.state !== "inactive") {
       tvScreenRecorderRef.current?.stop();
     }
@@ -1915,6 +2126,14 @@ export default function App() {
                     <strong>Chromecast 화면 스트림 옵션</strong>
                     <div className="stream-option-grid">
                       <label>
+                        Stream Mode
+                        <select value={screenStreamMode} onChange={(event) => setScreenStreamMode(event.target.value as typeof screenStreamMode)}>
+                          <option value="auto">Auto(WebRTC → HLS)</option>
+                          <option value="webrtc-low-latency">Low Latency WebRTC</option>
+                          <option value="hls-stable">Stable HLS</option>
+                        </select>
+                      </label>
+                      <label>
                         Preset
                         <select value={screenStreamOptions.preset} onChange={(event) => applyScreenStreamPreset(event.target.value as ScreenStreamOptions["preset"])}>
                           <option value="low-latency">Low Latency</option>
@@ -1968,8 +2187,19 @@ export default function App() {
                         </select>
                       </label>
                     </div>
+                    <label>
+                      Custom Receiver App ID
+                      <input
+                        value={customReceiverAppId}
+                        placeholder="Google Cast SDK Receiver App ID"
+                        onChange={(event) => setCustomReceiverAppId(event.target.value.trim())}
+                      />
+                    </label>
                     <div className="button-row">
-                      <button onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment")}>Chromecast 화면 스트림 시작</button>
+                      <button onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "auto")}>Auto로 시작</button>
+                      <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "webrtc-low-latency")}>Low Latency로 시작</button>
+                      <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "hls-stable")}>Stable HLS로 시작</button>
+                      <button className="ghost-button" onClick={() => void testCustomReceiverLaunch(selectedTv)}>Receiver 연결 테스트</button>
                       <button className="ghost-button" onClick={() => void diagnoseStreamRequests()}>스트림 URL 진단</button>
                       <button className="ghost-button" onClick={() => void copyStreamUrls()}>스트림 URL 복사</button>
                       <button className="danger-button" onClick={() => void stopActiveTvConnection()}>
@@ -1977,9 +2207,12 @@ export default function App() {
                       </button>
                     </div>
                     <p className="muted">
-                      공유할 화면은 다음 단계에서 OS 선택 창으로 직접 고릅니다. Auto는 HLS를 먼저 시도합니다. Low Latency는 720p / 15fps / 2 Mbps / 1초 segment를 사용하고,
-                      Low CPU는 540p / 10fps / 1 Mbps로 발열을 줄입니다.
+                      공유할 화면은 다음 단계에서 OS 선택 창으로 직접 고릅니다. Auto는 WebRTC Custom Receiver를 먼저 시도하고 실패하면 Stable HLS로 전환합니다. HLS Default Receiver는 지연이 길지만 fallback으로 유지됩니다.
                     </p>
+                    <div className="stream-diagnostics">
+                      <strong>Low Latency WebRTC 상태</strong>
+                      <p className="muted">Receiver App ID: {customReceiverAppId ? "설정됨" : "없음"} / {webRtcCastStatus}{webRtcRttMs !== null ? ` / RTT ${webRtcRttMs}ms` : ""}</p>
+                    </div>
                     <div className="button-row compact">
                       <button className="ghost-button" onClick={() => void restartScreenStreamWithPreset(selectedTv, "low-latency")}>Low Latency로 재시작</button>
                       <button className="ghost-button" onClick={() => void restartScreenStreamWithPreset(selectedTv, "low-cpu")}>Low CPU로 재시작</button>

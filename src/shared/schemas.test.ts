@@ -10,9 +10,9 @@ import { getDirectedBroadcast, isPrivateIpv4, isPrivateOrLoopback } from "./netw
 import { mergeTvDevices } from "./tvActions";
 import { DLNAMediaRequestSchema, TVActionRequestSchema, TVDeviceSchema } from "./tvSchemas";
 import { getTvConnectorPlan } from "./tvConnectionPlan";
-import { TVConnectionEventSchema, TVConnectionStartRequestSchema } from "./tvConnectionSchemas";
+import { CastWebRtcSignalRequestSchema, CastWebRtcSignalSchema, TVConnectionEventSchema, TVConnectionStartRequestSchema } from "./tvConnectionSchemas";
 import { buildDidlLiteMetadata, buildSoapEnvelope, extractDlnaAvTransportService } from "../main/connectors/dlnaConnector";
-import { createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
+import { createCustomReceiverLaunchPayload, createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
 import { getBestLocalIp, getContentTypeForPath, getMediaTypeForPath } from "../main/mediaServer";
 import { chooseScreenStreamMimeType, getScreenStreamDiagnostics, getScreenStreamLimits } from "../main/screenStreamServer";
 import { buildHlsFfmpegArgs, getHlsReadyState, getHlsScreenStreamDiagnostics } from "../main/hlsScreenStreamServer";
@@ -233,6 +233,7 @@ describe("schema validation", () => {
     expect(decoded.sourceId).toBe("sender-1");
     expect(JSON.parse(decoded.payloadUtf8).type).toBe("GET_STATUS");
     expect(createReceiverLaunchPayload(2)).toMatchObject({ type: "LAUNCH", appId: "CC1AD845", requestId: 2 });
+    expect(createCustomReceiverLaunchPayload(5, "ABCD1234")).toMatchObject({ type: "LAUNCH", appId: "ABCD1234", requestId: 5 });
     expect(createMediaLoadPayload(3, "session", "http://192.168.1.2/media/movie.mp4", "video/mp4")).toMatchObject({
       type: "LOAD",
       media: { streamType: "BUFFERED", contentType: "video/mp4" }
@@ -241,6 +242,16 @@ describe("schema validation", () => {
       type: "LOAD",
       media: { streamType: "LIVE", contentType: "video/webm" }
     });
+  });
+
+  it("validates WebRTC custom receiver signaling messages", () => {
+    expect(CastWebRtcSignalSchema.safeParse({ type: "receiver-ready", timestamp: Date.now() }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "sender-offer", sdp: "v=0" }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "receiver-answer", sdp: "v=0" }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "sender-ice", candidate: null }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "receiver-stats", rendering: true, rttMs: 12 }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "sender-offer" }).success).toBe(false);
+    expect(CastWebRtcSignalRequestSchema.safeParse({ connectionId: "conn", message: { type: "ping", timestamp: Date.now() } }).success).toBe(true);
   });
 
   it("selects a screen stream MIME type", () => {

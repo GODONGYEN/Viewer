@@ -157,6 +157,29 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 7. Activity Monitor에서 Electron/ffmpeg CPU 사용률을 함께 확인합니다.
 8. TV가 짧은 HLS playlist를 불안정하게 처리하면 `Balanced` preset으로 다시 테스트합니다.
 
+### Chromecast Low Latency WebRTC 테스트
+
+1. `receiver/` 폴더를 HTTPS 호스팅에 배포합니다. GitHub Pages, Vercel, Netlify 같은 정적 호스팅을 사용할 수 있습니다.
+2. Google Cast SDK Developer Console에서 Custom Web Receiver를 만들고 배포한 HTTPS URL을 등록합니다.
+3. 발급된 Custom Receiver App ID를 TV Cast 패널의 `Custom Receiver App ID` 입력란에 넣습니다.
+4. `Receiver 연결 테스트`를 눌러 `LAUNCH Custom WebRTC Receiver`, `custom-namespace-connected`, `receiver-ready` 로그가 나오는지 확인합니다.
+5. `Auto로 시작` 또는 `Low Latency로 시작`을 누릅니다.
+6. OS 화면 선택 권한을 직접 허용합니다.
+7. 타임라인에서 `receiver-ready`, `WebRTC offer sent`, `receiver-answer`, `receiver-ice`, `WebRTC connectionState: connected`, `Receiver rendering`을 확인합니다.
+8. 지연 시간은 우선 TV와 노트북에 같은 초 단위 타이머를 띄워 비교합니다. WebRTC 목표는 1~3초입니다.
+9. `ICE failed`, `receiver-ready timeout`, `receiver-error`가 나오면 같은 LAN인지, Chromecast가 Receiver URL에 접근 가능한지, Receiver App ID가 올바른지 확인합니다.
+10. Auto 모드에서 WebRTC가 실패하면 Stable HLS fallback이 시작되는지 확인합니다.
+
+### Custom Receiver 문제 해결
+
+- Receiver URL은 Chromecast가 접근 가능한 HTTPS여야 합니다.
+- App ID가 비어 있으면 Low Latency WebRTC는 시작하지 않고 Auto에서는 Stable HLS로 전환합니다.
+- TV 화면이 검은색이면 receiver page의 status가 `Receiving screen...`인지 확인합니다.
+- `receiver-ready`가 없으면 Custom Receiver launch 또는 namespace 연결 문제입니다.
+- `receiver-answer`가 없으면 receiver page의 WebRTC offer 처리 문제입니다.
+- `ICE failed`는 LAN 라우팅, AP isolation, 방화벽, VPN 문제일 수 있습니다.
+- 이 receiver는 영상 표시 전용입니다. 원격 제어, 보호 콘텐츠 우회, 인증 우회는 지원하지 않습니다.
+
 ### Electron 화면 캡처 fallback 테스트
 
 `화면 캡처 시작 실패: Not supported`가 나던 환경에서는 다음 흐름을 확인합니다.

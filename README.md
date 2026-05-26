@@ -155,6 +155,8 @@ If a Chromecast or Google TV-like device is detected, the app uses a built-in Ca
 
 ### Chromecast Screen Stream
 
+HLS Default Media Receiver mode is kept as `Stable HLS` fallback. It is reliable for media playback, but HLS segmenting, playlist windows, receiver buffering, and `LOAD → PLAYING` timing can produce 10+ seconds of delay. For real screen sharing, the app now adds `Low Latency WebRTC` through a Chromecast Custom Web Receiver.
+
 The screen stream flow is:
 
 1. User clicks `Chromecast 화면 스트림 시작`.
@@ -176,6 +178,23 @@ Available stream presets:
 Latency cannot be zero because the pipeline still has capture, encoding, HLS segmenting, LAN transfer, and Chromecast buffering. Use `Low Latency` first; if the Mac gets hot or diagnostics show ffmpeg speed below `0.9x`, switch to `Low CPU`.
 
 The TV detail panel includes a stream diagnostics view. It shows the generated HLS/WebM URLs, whether HLS playlist and first segment are ready, whether WebM init chunks exist, recent HTTP requests from Chromecast, and Chromecast `MEDIA_STATUS` values such as `BUFFERING`, `PLAYING`, `IDLE`, and `ERROR`.
+
+### Low Latency WebRTC Receiver
+
+Low Latency mode uses a custom Cast receiver page from the `receiver/` directory:
+
+1. Electron captures the screen only after the user clicks start.
+2. The app launches your registered Custom Receiver App ID.
+3. Cast custom namespace `urn:x-cast:com.godonghyeon.viewer.webrtc` carries WebRTC offer/answer/ICE messages.
+4. The receiver page displays the remote video track directly in a fullscreen `<video>` element.
+5. If receiver launch, signaling, ICE, or rendering fails in Auto mode, the app falls back to Stable HLS.
+
+Custom Receiver requirements:
+
+- Register a Custom Web Receiver in the Google Cast SDK Developer Console.
+- Host `receiver/index.html`, `receiver/receiver.js`, and `receiver/receiver.css` on an HTTPS URL such as GitHub Pages, Vercel, or Netlify.
+- Enter the generated Receiver App ID in the TV Cast panel or set `VITE_CAST_CUSTOM_RECEIVER_APP_ID`.
+- The receiver only displays video. It does not receive keyboard or mouse control events.
 
 ### DLNA Guidance
 

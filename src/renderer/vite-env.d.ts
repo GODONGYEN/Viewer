@@ -106,6 +106,7 @@ declare global {
     | "connect"
     | "cast-test-media"
     | "start-screen-cast-experiment"
+    | "start-webrtc-screen-cast"
     | "play-dlna-media"
     | "airplay-start"
     | "miracast-start";
@@ -140,6 +141,8 @@ declare global {
     mediaFilePath?: string;
     contentType?: string;
     streamType?: "BUFFERED" | "LIVE";
+    screenStreamMode?: "auto" | "webrtc-low-latency" | "hls-stable";
+    customReceiverAppId?: string;
     screenStreamStrategy?: "auto" | "webm" | "hls";
     screenStreamOptions?: ScreenStreamOptions;
     screenStreamSources?: ScreenStreamSource[];
@@ -269,6 +272,7 @@ declare global {
       pushScreenStreamChunk: (payload: { streamId: string; chunk: ArrayBuffer }) => Promise<{ ok: boolean; message?: string }>;
       stopScreenStream: (streamId: string) => Promise<{ ok: boolean; message?: string }>;
       getScreenStreamDiagnostics: (payload: { streamIds?: string[] }) => Promise<ScreenStreamDiagnostics>;
+      sendWebRtcSignal: (payload: { connectionId: string; message: Record<string, unknown> }) => Promise<{ ok: boolean; message?: string }>;
       stopAllConnections: () => Promise<{ ok: boolean }>;
       onConnectionEvent: (callback: (event: TVConnectionEvent) => void) => () => void;
     };

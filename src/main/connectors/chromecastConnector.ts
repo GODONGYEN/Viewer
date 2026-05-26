@@ -6,12 +6,13 @@ import { verifyLocalStreamUrl, waitForHlsReady } from "../hlsScreenStreamServer"
 import { ScreenStreamSource } from "../../shared/tvConnectionTypes";
 
 const activeCastClients = new Map<string, CastV2Client>();
+export const CAST_WEBRTC_NAMESPACE = "urn:x-cast:com.godonghyeon.viewer.webrtc";
 
 export const chromecastConnector: TVConnector = {
   kind: "chromecast",
   canHandle(device, options) {
     const protocols = device.protocols ?? [device.protocol];
-    return protocols.includes("Chromecast") && ["connect", "cast-test-media", "start-screen-cast-experiment", undefined].includes(options.action);
+    return protocols.includes("Chromecast") && ["connect", "cast-test-media", "start-screen-cast-experiment", "start-webrtc-screen-cast", undefined].includes(options.action);
   },
   async connect(context: ConnectorContext): Promise<ConnectorResult> {
     const client = new CastV2Client({ ipAddress: context.device.ipAddress });
@@ -36,6 +37,10 @@ export const chromecastConnector: TVConnector = {
       message: "Chromecast receiver 상태를 확인합니다."
     });
     await client.getStatus();
+
+    if (context.options.action === "start-webrtc-screen-cast") {
+      return launchWebRtcReceiver(client, context);
+    }
 
     context.emit({
       connectionId: context.connectionId,
@@ -169,6 +174,11 @@ export const chromecastConnector: TVConnector = {
   async stop(connectionId): Promise<ConnectorResult> {
     const client = activeCastClients.get(connectionId);
     if (client) {
+      try {
+        client.sendCustomMessage(CAST_WEBRTC_NAMESPACE, { type: "stop-stream" });
+      } catch {
+        // Receiver may already be gone; cleanup continues with Cast connection close.
+      }
       await client.stopMedia().catch(() => undefined);
       client.close();
       activeCastClients.delete(connectionId);
@@ -182,6 +192,79 @@ export const chromecastConnector: TVConnector = {
     };
   }
 };
+
+export function sendChromecastWebRtcSignal(connectionId: string, message: Record<string, unknown>) {
+  const client = activeCastClients.get(connectionId);
+  if (!client) return { ok: false, message: "활성 Chromecast WebRTC 연결을 찾지 못했습니다." };
+  client.sendCustomMessage(CAST_WEBRTC_NAMESPACE, message as Record<string, unknown> & { type: string });
+  return { ok: true };
+}
+
+async function launchWebRtcReceiver(client: CastV2Client, context: ConnectorContext): Promise<ConnectorResult> {
+  const appId = context.options.customReceiverAppId?.trim();
+  if (!appId) {
+    return {
+      ok: false,
+      status: "unsupported",
+      message: "WebRTC Low Latency 모드에는 등록된 Custom Receiver App ID가 필요합니다.",
+      canFallback: true
+    };
+  }
+
+  context.emit({
+    connectionId: context.connectionId,
+    deviceId: context.device.id,
+    connector: "chromecast",
+    status: "receiver-starting",
+    step: "LAUNCH Custom WebRTC Receiver",
+    message: "Custom WebRTC Receiver를 실행합니다.",
+    details: { appId }
+  });
+  const application = await client.launchReceiver(appId);
+
+  context.emit({
+    connectionId: context.connectionId,
+    deviceId: context.device.id,
+    connector: "chromecast",
+    status: "receiver-starting",
+    step: "custom-namespace-connected",
+    message: "Custom namespace를 WebRTC signaling channel로 연결했습니다.",
+    details: { namespace: CAST_WEBRTC_NAMESPACE, sessionId: application.sessionId, transportId: application.transportId }
+  });
+
+  client.on("custom-payload", (event: { namespace: string; payload: Record<string, unknown> & { type?: string } }) => {
+    if (event.namespace !== CAST_WEBRTC_NAMESPACE) return;
+    context.emit({
+      connectionId: context.connectionId,
+      deviceId: context.device.id,
+      connector: "chromecast",
+      status: event.payload.type === "receiver-error" ? "failed" : event.payload.type === "receiver-stats" && event.payload.rendering ? "playing" : "media-loading",
+      step: "webrtc-signal",
+      message: `Receiver signaling: ${event.payload.type ?? "unknown"}`,
+      details: { signalType: String(event.payload.type ?? "unknown"), signalJson: JSON.stringify(event.payload).slice(0, 5000) }
+    });
+  });
+
+  client.sendCustomMessage(CAST_WEBRTC_NAMESPACE, { type: "sender-hello", timestamp: Date.now() });
+  await client.waitForCustomPayload(CAST_WEBRTC_NAMESPACE, (payload) => payload.type === "receiver-ready", 15000);
+
+  context.emit({
+    connectionId: context.connectionId,
+    deviceId: context.device.id,
+    connector: "chromecast",
+    status: "media-loading",
+    step: "receiver-ready",
+    message: "Custom Receiver가 준비되었습니다. Renderer WebRTC offer를 시작할 수 있습니다."
+  });
+
+  return {
+    ok: true,
+    status: "user-action-required",
+    message: "Custom WebRTC Receiver가 준비되었습니다. WebRTC signaling을 시작합니다.",
+    canFallback: false,
+    details: { appId, namespace: CAST_WEBRTC_NAMESPACE }
+  };
+}
 
 async function waitForStreamSourceReady(source: ScreenStreamSource, context: ConnectorContext) {
   if (source.strategy === "hls") {

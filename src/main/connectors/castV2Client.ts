@@ -132,9 +132,13 @@ export function decodeCastMessage(protobuf: Buffer): CastMessage {
 }
 
 export function createReceiverLaunchPayload(requestId: number) {
+  return createCustomReceiverLaunchPayload(requestId, DEFAULT_MEDIA_RECEIVER_APP_ID);
+}
+
+export function createCustomReceiverLaunchPayload(requestId: number, appId: string) {
   return {
     type: "LAUNCH",
-    appId: DEFAULT_MEDIA_RECEIVER_APP_ID,
+    appId,
     requestId
   };
 }
@@ -222,18 +226,59 @@ export class CastV2Client extends EventEmitter {
   }
 
   async launchDefaultMediaReceiver() {
+    return this.launchReceiver(DEFAULT_MEDIA_RECEIVER_APP_ID);
+  }
+
+  async launchReceiver(appId: string) {
     const requestId = this.nextRequestId();
-    this.sendJson(RECEIVER_DESTINATION, NAMESPACE_RECEIVER, createReceiverLaunchPayload(requestId));
+    this.sendJson(RECEIVER_DESTINATION, NAMESPACE_RECEIVER, createCustomReceiverLaunchPayload(requestId, appId));
     const response = await this.waitForPayload((payload) => payload.type === "RECEIVER_STATUS" && payload.requestId === requestId);
-    const application = findDefaultMediaReceiver(response);
+    const application = findReceiverApplication(response, appId);
     if (!application?.sessionId || !application.transportId) {
-      throw new Error("Default Media Receiver sessionId/transportId를 찾지 못했습니다.");
+      throw new Error(`Cast Receiver appId=${appId} sessionId/transportId를 찾지 못했습니다.`);
     }
 
     this.sessionId = application.sessionId;
     this.transportId = application.transportId;
     this.sendJson(this.transportId, NAMESPACE_CONNECTION, { type: "CONNECT", origin: {} });
     return application;
+  }
+
+  sendCustomMessage(namespace: string, payload: CastPayload) {
+    if (!this.transportId) {
+      throw new Error("Custom Receiver transportId가 없습니다. 먼저 receiver를 실행해야 합니다.");
+    }
+    this.sendJson(this.transportId, namespace, payload);
+  }
+
+  async waitForCustomPayload(namespace: string, predicate: (payload: CastPayload) => boolean, timeoutMs = this.timeoutMs) {
+    return new Promise<CastPayload>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("Custom Receiver 메시지 대기 시간이 초과되었습니다."));
+      }, timeoutMs);
+
+      const onPayload = (event: { namespace: string; payload: CastPayload }) => {
+        if (event.namespace !== namespace) return;
+        if (!predicate(event.payload)) return;
+        cleanup();
+        resolve(event.payload);
+      };
+
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("custom-payload", onPayload);
+        this.off("error", onError);
+      };
+
+      this.on("custom-payload", onPayload);
+      this.on("error", onError);
+    });
   }
 
   async loadMedia(mediaUrl: string, contentType: string, streamType: "BUFFERED" | "LIVE" = "BUFFERED") {
@@ -307,7 +352,9 @@ export class CastV2Client extends EventEmitter {
       this.emit("message", message);
       if (message.payloadUtf8) {
         try {
-          this.emit("payload", JSON.parse(message.payloadUtf8) as CastPayload);
+          const payload = JSON.parse(message.payloadUtf8) as CastPayload;
+          this.emit("payload", payload);
+          this.emit("custom-payload", { namespace: message.namespace, payload });
         } catch {
           // Ignore malformed receiver payloads; waiters parse defensively too.
         }
@@ -360,6 +407,10 @@ export class CastV2Client extends EventEmitter {
 }
 
 function findDefaultMediaReceiver(payload: CastPayload): ReceiverApplication | undefined {
+  return findReceiverApplication(payload, DEFAULT_MEDIA_RECEIVER_APP_ID);
+}
+
+function findReceiverApplication(payload: CastPayload, appId: string): ReceiverApplication | undefined {
   const status = payload.status as { applications?: ReceiverApplication[] } | undefined;
-  return status?.applications?.find((application) => application.appId === DEFAULT_MEDIA_RECEIVER_APP_ID) ?? status?.applications?.[0];
+  return status?.applications?.find((application) => application.appId === appId) ?? status?.applications?.[0];
 }

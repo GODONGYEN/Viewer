@@ -1,7 +1,7 @@
 import { BrowserWindow, dialog, ipcMain } from "electron";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { TVConnectionStartRequestSchema } from "../shared/tvConnectionSchemas";
+import { CastWebRtcSignalRequestSchema, TVConnectionStartRequestSchema } from "../shared/tvConnectionSchemas";
 import { getTvConnectorPlan } from "../shared/tvConnectionPlan";
 import {
   DLNAMediaSelection,
@@ -19,6 +19,7 @@ import { chromecastConnector } from "./connectors/chromecastConnector";
 import { dlnaConnector } from "./connectors/dlnaConnector";
 import { miracastConnector } from "./connectors/miracastConnector";
 import { TVConnector } from "./connectors/types";
+import { sendChromecastWebRtcSignal } from "./connectors/chromecastConnector";
 
 const CONNECTORS: TVConnector[] = [chromecastConnector, airplayConnector, dlnaConnector, miracastConnector];
 const MEDIA_EXTENSIONS = ["mp4", "m4v", "mov", "mp3", "jpg", "jpeg", "png"];
@@ -208,6 +209,11 @@ export function setupTvConnectionIpc(window: BrowserWindow) {
     webm: getScreenStreamDiagnostics(payload?.streamIds),
     hls: getHlsScreenStreamDiagnostics(payload?.streamIds)
   }));
+  ipcMain.handle("tv-connection:webrtc-signal", (_event, payload: unknown) => {
+    const parsed = CastWebRtcSignalRequestSchema.safeParse(payload);
+    if (!parsed.success) return { ok: false, message: "잘못된 WebRTC signaling 메시지입니다." };
+    return sendChromecastWebRtcSignal(parsed.data.connectionId, parsed.data.message);
+  });
   ipcMain.handle("tv-connection:stop-all", async () => {
     for (const connectionId of activeConnections.keys()) {
       await stopTvConnection(connectionId);
