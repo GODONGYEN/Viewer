@@ -167,6 +167,8 @@ The screen stream flow is:
 
 Default options are `720p`, `15fps`, `2 Mbps`, and `Auto(HLS first)`. Auto starts HLS and WebM sessions from the same user-approved capture, waits for the HLS playlist and first segment before sending Chromecast `LOAD`, and falls back to WebM if the HLS strategy fails. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility, with a few seconds of latency.
 
+The TV detail panel includes a stream diagnostics view. It shows the generated HLS/WebM URLs, whether HLS playlist and first segment are ready, whether WebM init chunks exist, recent HTTP requests from Chromecast, and Chromecast `MEDIA_STATUS` values such as `BUFFERING`, `PLAYING`, `IDLE`, and `ERROR`.
+
 ### DLNA Guidance
 
 DLNA is better suited for media file playback than full-screen mirroring. This app can select a local media file, serve it from a temporary local HTTP server, find AVTransport from the TV description XML, send `SetAVTransportURI`, and send `Play`. TV codec support varies by model.

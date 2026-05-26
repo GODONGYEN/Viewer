@@ -17,11 +17,23 @@ type HlsSession = {
   process: ChildProcessWithoutNullStreams;
   startedAt: number;
   lastError?: string;
+  requestLog: StreamHttpRequestLog[];
+};
+
+export type StreamHttpRequestLog = {
+  timestamp: number;
+  method: string;
+  path: string;
+  status: number;
+  userAgent?: string;
+  message?: string;
+  file?: string;
 };
 
 let server: http.Server | null = null;
 let port = 0;
 const sessions = new Map<string, HlsSession>();
+const orphanRequestLog: StreamHttpRequestLog[] = [];
 let eventSink: ((event: { streamId: string; type: string; message: string; details?: Record<string, string | number | boolean | undefined> }) => void) | null = null;
 
 export function setHlsStreamEventSink(sink: typeof eventSink) {
@@ -30,6 +42,15 @@ export function setHlsStreamEventSink(sink: typeof eventSink) {
 
 function emitHlsEvent(streamId: string, type: string, message: string, details?: Record<string, string | number | boolean | undefined>) {
   eventSink?.({ streamId, type, message, details });
+}
+
+function pushRequestLog(streamId: string, log: Omit<StreamHttpRequestLog, "timestamp">) {
+  const entry = { ...log, timestamp: Date.now() };
+  const session = sessions.get(streamId);
+  const target = session?.requestLog ?? orphanRequestLog;
+  target.unshift(entry);
+  target.splice(20);
+  return entry;
 }
 
 async function ensureHlsServer() {
@@ -52,6 +73,7 @@ async function ensureHlsServer() {
 
     const session = sessions.get(match[1]);
     if (!session) {
+      pushRequestLog(match[1], { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, userAgent: request.headers["user-agent"]?.slice(0, 120), message: "session not found" });
       emitHlsEvent(match[1], "stream-http-404", "HLS session을 찾지 못했습니다.", { method: request.method ?? "GET", path: requestUrl.pathname, status: 404 });
       response.writeHead(404);
       response.end("HLS session not found");
@@ -61,6 +83,7 @@ async function ensureHlsServer() {
     const requestedFile = path.basename(match[2]);
     const filePath = path.join(session.directory, requestedFile);
     if (!fs.existsSync(filePath)) {
+      pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, file: requestedFile, userAgent: request.headers["user-agent"]?.slice(0, 120), message: "file not ready" });
       emitHlsEvent(session.id, "stream-http-404", "HLS 파일이 아직 준비되지 않았습니다.", { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, file: requestedFile });
       response.writeHead(404, { "Access-Control-Allow-Origin": "*" });
       response.end("HLS segment not ready");
@@ -68,6 +91,7 @@ async function ensureHlsServer() {
     }
 
     const contentType = requestedFile.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : requestedFile.endsWith(".m4s") ? "video/iso.segment" : "video/mp2t";
+    pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 200, file: requestedFile, userAgent: request.headers["user-agent"]?.slice(0, 120), message: requestedFile.endsWith(".m3u8") ? "playlist requested" : "segment requested" });
     emitHlsEvent(session.id, requestedFile.endsWith(".m3u8") ? "chromecast-requested-playlist" : "chromecast-requested-segment", "Chromecast 또는 클라이언트가 HLS 파일을 요청했습니다.", {
       method: request.method ?? "GET",
       path: requestUrl.pathname,
@@ -154,7 +178,7 @@ export async function startHlsScreenStream(targetIp: string | undefined, options
     playlistPath
   ]);
 
-  const session: HlsSession = { id, directory, process: child, startedAt: Date.now() };
+  const session: HlsSession = { id, directory, process: child, startedAt: Date.now(), requestLog: [] };
   sessions.set(id, session);
   child.stderr.on("data", (chunk) => {
     session.lastError = chunk.toString("utf8").trim().slice(0, 500);
@@ -201,6 +225,25 @@ export function getHlsReadyState(streamId: string) {
     segmentCount: files.filter((file) => file.endsWith(".ts") || file.endsWith(".m4s")).length,
     lastError: session.lastError
   };
+}
+
+export function getHlsScreenStreamDiagnostics(streamIds?: string[]) {
+  const ids = streamIds?.length ? streamIds : [...sessions.keys()];
+  return ids.map((id) => {
+    const session = sessions.get(id);
+    const readyState = getHlsReadyState(id);
+    return {
+      id,
+      strategy: "hls" as const,
+      exists: Boolean(session),
+      startedAt: session?.startedAt,
+      playlistReady: readyState.playlistReady,
+      segmentReady: readyState.segmentReady,
+      segmentCount: readyState.segmentCount ?? 0,
+      lastError: readyState.lastError,
+      recentRequests: session?.requestLog ?? orphanRequestLog.filter((entry) => entry.path.includes(id)).slice(0, 20)
+    };
+  });
 }
 
 export async function waitForHlsReady(streamId: string, timeoutMs = 15000) {

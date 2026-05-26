@@ -12,8 +12,8 @@ import {
 } from "../shared/tvConnectionTypes";
 import { TVDevice } from "../shared/tvTypes";
 import { getMediaTypeForPath, stopMediaServer } from "./mediaServer";
-import { hasScreenStream, pushScreenStreamChunk, setScreenStreamEventSink, startScreenStream, stopAllScreenStreams, stopScreenStream } from "./screenStreamServer";
-import { hasHlsScreenStream, pushHlsScreenStreamChunk, setHlsStreamEventSink, startHlsScreenStream, stopAllHlsScreenStreams, stopHlsScreenStream } from "./hlsScreenStreamServer";
+import { getScreenStreamDiagnostics, hasScreenStream, pushScreenStreamChunk, setScreenStreamEventSink, startScreenStream, stopAllScreenStreams, stopScreenStream } from "./screenStreamServer";
+import { getHlsScreenStreamDiagnostics, hasHlsScreenStream, pushHlsScreenStreamChunk, setHlsStreamEventSink, startHlsScreenStream, stopAllHlsScreenStreams, stopHlsScreenStream } from "./hlsScreenStreamServer";
 import { airplayConnector } from "./connectors/airplayConnector";
 import { chromecastConnector } from "./connectors/chromecastConnector";
 import { dlnaConnector } from "./connectors/dlnaConnector";
@@ -203,6 +203,11 @@ export function setupTvConnectionIpc(window: BrowserWindow) {
     stopHlsScreenStream(streamId);
     return { ok: true };
   });
+  ipcMain.handle("tv-connection:screen-stream-diagnostics", (_event, payload: { streamIds?: string[] } | undefined) => ({
+    ok: true,
+    webm: getScreenStreamDiagnostics(payload?.streamIds),
+    hls: getHlsScreenStreamDiagnostics(payload?.streamIds)
+  }));
   ipcMain.handle("tv-connection:stop-all", async () => {
     for (const connectionId of activeConnections.keys()) {
       await stopTvConnection(connectionId);

@@ -1,7 +1,7 @@
 import { ConnectorContext, ConnectorResult, TVConnector } from "./types";
 import { CastV2Client } from "./castV2Client";
 import { addMediaFile, getContentTypeForPath } from "../mediaServer";
-import { waitForWebMReady } from "../screenStreamServer";
+import { verifyScreenStreamUrl, waitForWebMReady } from "../screenStreamServer";
 import { verifyLocalStreamUrl, waitForHlsReady } from "../hlsScreenStreamServer";
 import { ScreenStreamSource } from "../../shared/tvConnectionTypes";
 
@@ -194,6 +194,15 @@ async function waitForStreamSourceReady(source: ScreenStreamSource, context: Con
       message: "HLS playlist와 첫 segment 생성을 기다립니다."
     });
     await waitForHlsReady(source.id, 18000);
+    context.emit({
+      connectionId: context.connectionId,
+      deviceId: context.device.id,
+      connector: "chromecast",
+      status: "media-loading",
+      step: "stream-url-health-check",
+      message: "Mac 내부에서 HLS stream URL에 접근 가능한지 확인합니다.",
+      details: { url: source.url, strategy: source.strategy }
+    });
     await verifyLocalStreamUrl(source.url);
     context.emit({
       connectionId: context.connectionId,
@@ -216,6 +225,16 @@ async function waitForStreamSourceReady(source: ScreenStreamSource, context: Con
     message: "WebM init/header chunk 생성을 기다립니다."
   });
   await waitForWebMReady(source.id, 7000);
+  context.emit({
+    connectionId: context.connectionId,
+    deviceId: context.device.id,
+    connector: "chromecast",
+    status: "media-loading",
+    step: "stream-url-health-check",
+    message: "Mac 내부에서 WebM stream URL에 접근 가능한지 확인합니다.",
+    details: { url: source.url, strategy: source.strategy }
+  });
+  await verifyScreenStreamUrl(source.url);
 }
 
 async function loadChromecastSource(client: CastV2Client, source: ScreenStreamSource, context: ConnectorContext) {
@@ -228,5 +247,65 @@ async function loadChromecastSource(client: CastV2Client, source: ScreenStreamSo
     message: `Chromecast에 ${source.strategy.toUpperCase()} LIVE stream LOAD를 보냅니다.`,
     details: { contentType: source.contentType, url: source.url }
   });
-  return client.loadMedia(source.url, source.contentType, "LIVE");
+  const status = await client.loadMedia(source.url, source.contentType, "LIVE");
+  context.emit({
+    connectionId: context.connectionId,
+    deviceId: context.device.id,
+    connector: "chromecast",
+    status: status?.playerState === "IDLE" && status.idleReason === "ERROR" ? "failed" : "media-loading",
+    step: "MEDIA_STATUS initial",
+    message: `Chromecast initial media status: ${status?.playerState ?? "unknown"}${status?.idleReason ? ` / ${status.idleReason}` : ""}`,
+    details: {
+      mediaSessionId: status?.mediaSessionId,
+      playerState: status?.playerState,
+      idleReason: status?.idleReason,
+      errorCode: status?.errorCode,
+      errorReason: status?.errorReason,
+      strategy: source.strategy
+    }
+  });
+
+  if (status?.playerState === "PLAYING") return status;
+  const followUpStatus = await client
+    .waitForMediaStatus(12000, (nextStatus) => nextStatus.playerState === "PLAYING" || nextStatus.playerState === "IDLE" || nextStatus.idleReason === "ERROR")
+    .catch((error) => {
+    context.emit({
+      connectionId: context.connectionId,
+      deviceId: context.device.id,
+      connector: "chromecast",
+      status: "failed",
+      step: "MEDIA_STATUS timeout",
+      message: "Chromecast가 LOAD 이후 재생 상태를 제때 보고하지 않았습니다.",
+      details: { error: error instanceof Error ? error.message : String(error), strategy: source.strategy }
+    });
+    return undefined;
+  });
+
+  if (followUpStatus) {
+    context.emit({
+      connectionId: context.connectionId,
+      deviceId: context.device.id,
+      connector: "chromecast",
+      status: followUpStatus.playerState === "IDLE" && followUpStatus.idleReason === "ERROR" ? "failed" : followUpStatus.playerState === "PLAYING" ? "playing" : "media-loading",
+      step: "MEDIA_STATUS follow-up",
+      message: `Chromecast follow-up media status: ${followUpStatus.playerState ?? "unknown"}${followUpStatus.idleReason ? ` / ${followUpStatus.idleReason}` : ""}`,
+      details: {
+        mediaSessionId: followUpStatus.mediaSessionId,
+        playerState: followUpStatus.playerState,
+        idleReason: followUpStatus.idleReason,
+        errorCode: followUpStatus.errorCode,
+        errorReason: followUpStatus.errorReason,
+        strategy: source.strategy
+      }
+    });
+  }
+
+  if (!followUpStatus) {
+    throw new Error("Chromecast가 stream LOAD 이후 PLAYING 상태를 보고하지 않았습니다.");
+  }
+  if (followUpStatus.playerState === "IDLE" && followUpStatus.idleReason === "ERROR") {
+    throw new Error(`Chromecast media status ERROR: ${followUpStatus.errorCode ?? followUpStatus.errorReason ?? "unknown"}`);
+  }
+
+  return followUpStatus ?? status;
 }

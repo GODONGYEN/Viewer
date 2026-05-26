@@ -24,6 +24,8 @@ export type CastMediaStatus = {
   mediaSessionId?: number;
   playerState?: string;
   idleReason?: string;
+  errorCode?: string;
+  errorReason?: string;
 };
 
 export type CastV2ClientOptions = {
@@ -254,6 +256,14 @@ export class CastV2Client extends EventEmitter {
     return status;
   }
 
+  async waitForMediaStatus(timeoutMs = this.timeoutMs, predicate: (status: CastMediaStatus) => boolean = () => true) {
+    return this.waitForPayload((payload) => {
+      if (payload.type !== "MEDIA_STATUS" || !Array.isArray(payload.status)) return false;
+      const status = payload.status[0] as CastMediaStatus | undefined;
+      return Boolean(status && predicate(status));
+    }, timeoutMs).then((payload) => (Array.isArray(payload.status) ? (payload.status[0] as CastMediaStatus | undefined) : undefined));
+  }
+
   async stopMedia() {
     if (!this.transportId || !this.mediaSessionId) return;
     const requestId = this.nextRequestId();
@@ -294,6 +304,13 @@ export class CastV2Client extends EventEmitter {
       this.buffer = this.buffer.subarray(4 + length);
       const message = decodeCastMessage(frame);
       this.emit("message", message);
+      if (message.payloadUtf8) {
+        try {
+          this.emit("payload", JSON.parse(message.payloadUtf8) as CastPayload);
+        } catch {
+          // Ignore malformed receiver payloads; waiters parse defensively too.
+        }
+      }
 
       if (message.namespace === NAMESPACE_HEARTBEAT) {
         const payload = JSON.parse(message.payloadUtf8) as CastPayload;

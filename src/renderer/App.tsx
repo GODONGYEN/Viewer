@@ -179,6 +179,7 @@ export default function App() {
   const [screenStreamOptions, setScreenStreamOptions] = useState<ScreenStreamOptions>({ strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 2 });
   const [screenPreviewActive, setScreenPreviewActive] = useState(false);
   const [lastScreenStreamSources, setLastScreenStreamSources] = useState<ScreenStreamSource[]>([]);
+  const [screenStreamDiagnostics, setScreenStreamDiagnostics] = useState<ScreenStreamDiagnostics | null>(null);
   const [captureSources, setCaptureSources] = useState<ScreenCaptureSource[]>([]);
   const [showCaptureSourcePicker, setShowCaptureSourcePicker] = useState(false);
   const [captureStatusMessage, setCaptureStatusMessage] = useState("");
@@ -1146,6 +1147,7 @@ export default function App() {
       if (!capture) return null;
 
       const { stream, method, sourceName } = capture;
+      setScreenStreamDiagnostics(null);
       const strategies: Array<"hls" | "webm"> = options.strategy === "hls" ? ["hls"] : options.strategy === "webm" ? ["webm"] : ["hls", "webm"];
       const sources: ScreenStreamSource[] = [];
 
@@ -1165,6 +1167,8 @@ export default function App() {
         setTvActionMessage("HLS/WebM 화면 스트림 세션을 시작하지 못했습니다.");
         return null;
       }
+
+      setLastScreenStreamSources(sources);
 
       const recorderOptions: MediaRecorderOptions = {
         videoBitsPerSecond: options.bitrateMbps * 1_000_000
@@ -1188,6 +1192,20 @@ export default function App() {
             void window.tvConnection?.pushScreenStreamChunk({ streamId, chunk });
           }
         });
+      };
+      recorder.onstart = () => {
+        setTvConnectionEvents((current) => [
+          {
+            connectionId: activeTvConnectionId || `recorder-${Date.now()}`,
+            deviceId: device.id,
+            connector: "diagnostic",
+            status: "media-loading",
+            step: "MediaRecorder started",
+            message: `MediaRecorder가 시작되었습니다. MIME=${recorder.mimeType || mimeType || "browser-default"}`,
+            timestamp: Date.now()
+          },
+          ...current
+        ]);
       };
       recorder.onerror = () => {
         setTvActionMessage("화면 스트림 MediaRecorder 오류가 발생했습니다.");
@@ -1264,6 +1282,21 @@ export default function App() {
     setTvConnectionEvents((current) => [event, ...current].slice(0, 80));
   }
 
+  function markScreenPreviewReady(device: TVDevice) {
+    setTvConnectionEvents((current) => [
+      {
+        connectionId: activeTvConnectionId || `preview-${Date.now()}`,
+        deviceId: device.id,
+        connector: "diagnostic",
+        status: "media-loading",
+        step: "preview-ready",
+        message: "Renderer preview video에 캡처 화면이 표시되었습니다.",
+        timestamp: Date.now()
+      },
+      ...current
+    ]);
+  }
+
   async function copyTvFailureLog() {
     const payload = tvConnectionEvents.map((event) => ({
       time: new Date(event.timestamp).toISOString(),
@@ -1286,7 +1319,11 @@ export default function App() {
     setTvActionMessage("최근 화면 스트림 URL을 클립보드에 복사했습니다.");
   }
 
-  function diagnoseStreamRequests() {
+  async function diagnoseStreamRequests() {
+    if (lastScreenStreamSources.length > 0) {
+      const diagnostics = await window.tvConnection?.getScreenStreamDiagnostics({ streamIds: lastScreenStreamSources.map((source) => source.id) });
+      if (diagnostics?.ok) setScreenStreamDiagnostics(diagnostics);
+    }
     const streamEvents = tvConnectionEvents.filter((event) => event.step.includes("stream") || event.step.includes("hls") || event.step.includes("webm") || event.step.includes("chromecast-requested"));
     const requested = streamEvents.some((event) => event.step.includes("requested") || event.step.includes("client-connected"));
     setTvActionMessage(requested ? "Chromecast/클라이언트가 스트림 URL을 요청한 기록이 있습니다. 타임라인의 HTTP 200/404 이벤트를 확인하세요." : "아직 Chromecast가 스트림 URL을 요청한 기록이 없습니다. 방화벽, AP isolation, LAN IP 접근성을 확인하세요.");
@@ -1851,7 +1888,7 @@ export default function App() {
                     </div>
                     <div className="button-row">
                       <button onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment")}>Chromecast 화면 스트림 시작</button>
-                      <button className="ghost-button" onClick={diagnoseStreamRequests}>스트림 URL 진단</button>
+                      <button className="ghost-button" onClick={() => void diagnoseStreamRequests()}>스트림 URL 진단</button>
                       <button className="ghost-button" onClick={() => void copyStreamUrls()}>스트림 URL 복사</button>
                       <button className="danger-button" onClick={() => void stopActiveTvConnection()}>
                         화면 스트림 중지
@@ -1868,7 +1905,53 @@ export default function App() {
                     )}
                     {screenPreviewActive && (
                       <div className="screen-preview">
-                        <video ref={tvScreenPreviewRef} autoPlay muted playsInline />
+                        <video ref={tvScreenPreviewRef} autoPlay muted playsInline onLoadedMetadata={() => markScreenPreviewReady(selectedTv)} />
+                      </div>
+                    )}
+                    {lastScreenStreamSources.length > 0 && (
+                      <div className="stream-diagnostics">
+                        <strong>최근 stream URL</strong>
+                        <ul>
+                          {lastScreenStreamSources.map((source) => (
+                            <li key={source.id}>
+                              <span>{source.strategy.toUpperCase()}</span>
+                              <code>{source.url}</code>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {screenStreamDiagnostics && (
+                      <div className="stream-diagnostics">
+                        <strong>스트림 진단</strong>
+                        {[...screenStreamDiagnostics.hls, ...screenStreamDiagnostics.webm].map((session) => (
+                          <div className="stream-diagnostic-card" key={`${session.strategy}:${session.id}`}>
+                            <div>
+                              <span>{session.strategy.toUpperCase()}</span>
+                              <strong>{session.exists ? "세션 있음" : "세션 없음"}</strong>
+                            </div>
+                            {"playlistReady" in session ? (
+                              <p>
+                                HLS ready: playlist {session.playlistReady ? "OK" : "대기"} / segment {session.segmentReady ? `OK(${session.segmentCount})` : "대기"}
+                              </p>
+                            ) : (
+                              <p>
+                                WebM ready: init {session.initChunkReady ? "OK" : "대기"} / queued chunks {session.queuedChunks} / clients {session.clients}
+                              </p>
+                            )}
+                            {session.recentRequests.length === 0 ? (
+                              <p className="muted">아직 Chromecast HTTP 요청 기록이 없습니다.</p>
+                            ) : (
+                              <ol>
+                                {session.recentRequests.slice(0, 6).map((request) => (
+                                  <li key={`${request.timestamp}:${request.path}:${request.status}`}>
+                                    <span>{new Date(request.timestamp).toLocaleTimeString()}</span> <strong>HTTP {request.status}</strong> {request.method} {request.path}
+                                  </li>
+                                ))}
+                              </ol>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

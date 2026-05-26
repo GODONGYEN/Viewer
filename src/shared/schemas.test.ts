@@ -14,8 +14,8 @@ import { TVConnectionEventSchema, TVConnectionStartRequestSchema } from "./tvCon
 import { buildDidlLiteMetadata, buildSoapEnvelope, extractDlnaAvTransportService } from "../main/connectors/dlnaConnector";
 import { createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
 import { getBestLocalIp, getContentTypeForPath, getMediaTypeForPath } from "../main/mediaServer";
-import { chooseScreenStreamMimeType, getScreenStreamLimits } from "../main/screenStreamServer";
-import { getHlsReadyState } from "../main/hlsScreenStreamServer";
+import { chooseScreenStreamMimeType, getScreenStreamDiagnostics, getScreenStreamLimits } from "../main/screenStreamServer";
+import { getHlsReadyState, getHlsScreenStreamDiagnostics } from "../main/hlsScreenStreamServer";
 import { chooseBestRecorderMimeType, getScreenCaptureSupport, isValidCaptureSource, normalizeCaptureError } from "../renderer/screenCapture";
 
 describe("network helpers", () => {
@@ -289,6 +289,11 @@ describe("schema validation", () => {
 
   it("reports missing HLS sessions as not ready", () => {
     expect(getHlsReadyState("missing-session")).toMatchObject({ exists: false, playlistReady: false, segmentReady: false });
+  });
+
+  it("reports missing stream diagnostics without crashing", () => {
+    expect(getScreenStreamDiagnostics(["missing-webm"])[0]).toMatchObject({ id: "missing-webm", strategy: "webm", exists: false, initChunkReady: false });
+    expect(getHlsScreenStreamDiagnostics(["missing-hls"])[0]).toMatchObject({ id: "missing-hls", strategy: "hls", exists: false, playlistReady: false, segmentReady: false });
   });
 
   it("checks screen capture support without assuming browser APIs", () => {

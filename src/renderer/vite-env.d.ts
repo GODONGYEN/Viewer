@@ -164,6 +164,41 @@ declare global {
     contentType: string;
     strategy: "webm" | "hls";
   };
+  type ScreenStreamRequestLog = {
+    timestamp: number;
+    method: string;
+    path: string;
+    status: number;
+    userAgent?: string;
+    message?: string;
+    file?: string;
+  };
+  type ScreenStreamDiagnostics = {
+    ok: boolean;
+    webm: Array<{
+      id: string;
+      strategy: "webm";
+      exists: boolean;
+      contentType?: string;
+      startedAt?: number;
+      initChunkReady: boolean;
+      queuedChunks: number;
+      totalBytes: number;
+      clients: number;
+      recentRequests: ScreenStreamRequestLog[];
+    }>;
+    hls: Array<{
+      id: string;
+      strategy: "hls";
+      exists: boolean;
+      startedAt?: number;
+      playlistReady: boolean;
+      segmentReady: boolean;
+      segmentCount: number;
+      lastError?: string;
+      recentRequests: ScreenStreamRequestLog[];
+    }>;
+  };
   type DLNAMediaSelection = {
     ok: boolean;
     fileName?: string;
@@ -225,6 +260,7 @@ declare global {
       startScreenStream: (payload: { targetIp?: string; deviceId?: string; contentType: string; strategy: "webm" | "hls"; options: ScreenStreamOptions }) => Promise<ScreenStreamSession>;
       pushScreenStreamChunk: (payload: { streamId: string; chunk: ArrayBuffer }) => Promise<{ ok: boolean; message?: string }>;
       stopScreenStream: (streamId: string) => Promise<{ ok: boolean; message?: string }>;
+      getScreenStreamDiagnostics: (payload: { streamIds?: string[] }) => Promise<ScreenStreamDiagnostics>;
       stopAllConnections: () => Promise<{ ok: boolean }>;
       onConnectionEvent: (callback: (event: TVConnectionEvent) => void) => () => void;
     };

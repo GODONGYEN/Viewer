@@ -140,6 +140,11 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 11. Auto에서 HLS가 실패하면 WebM 전략으로 자동 재시도되는지 타임라인을 확인합니다.
 12. WebM 단독 테스트는 방식 옵션을 `WebM live`로 바꾸고 다시 시도합니다.
 13. `화면 스트림 중지` 또는 `Cast 중지`를 눌렀을 때 캡처, MediaRecorder, stream server, Chromecast STOP이 정리되는지 확인합니다.
+14. 화면이 TV에 나오지 않으면 `스트림 URL 진단`을 누릅니다.
+15. HLS는 `playlist OK`와 `segment OK`가 표시되어야 합니다.
+16. WebM은 `init OK`와 queued chunks 증가가 표시되어야 합니다.
+17. 최근 HTTP 요청에 Chromecast의 `index.m3u8`, segment, 또는 `live.webm` 요청이 남는지 확인합니다.
+18. 타임라인에서 `MEDIA_STATUS initial`, `MEDIA_STATUS follow-up`, `MEDIA_STATUS timeout` 중 어떤 상태가 기록됐는지 확인합니다.
 
 ### Electron 화면 캡처 fallback 테스트
 
@@ -197,6 +202,9 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 - Auto는 HLS를 먼저 시도하고, 실패하면 WebM으로 자동 fallback합니다.
 - HLS 방식은 `ffmpeg-static`으로 변환하므로 CPU 사용량과 4~10초 지연이 생길 수 있습니다.
 - 타임라인에서 `chromecast-requested-playlist`, `chromecast-requested-segment`, `webm-client-connected`, `stream-http-404` 이벤트를 확인합니다.
+- `스트림 URL 진단`에서 최근 HTTP 요청이 비어 있으면 Chromecast가 Mac의 stream URL에 접근하지 못한 것입니다.
+- `MEDIA_STATUS follow-up`이 `PLAYING`이면 Chromecast receiver는 재생 상태를 보고한 것입니다. TV 화면이 비어 있으면 TV 출력/입력 상태를 함께 확인합니다.
+- `MEDIA_STATUS timeout`이면 Chromecast가 URL을 받았지만 재생 가능한 스트림으로 확정하지 못한 상태입니다. HLS segment 생성, codec, 방화벽 로그를 같이 확인합니다.
 - Chromecast media status 오류가 타임라인에 표시되면 content type, codec, stream URL 접근성을 기록합니다.
 - 보호 콘텐츠/DRM 우회 목적의 화면은 테스트하지 않습니다.
 
