@@ -1,0 +1,80 @@
+{
+  "name": "lan-screen-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Consent-first LAN screen sharing app for trusted local networks.",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k \"npm:dev:vite\" \"npm:watch:electron\" \"npm:dev:electron\"",
+    "dev:server": "tsx server/signaling.ts",
+    "dev:vite": "vite --host 0.0.0.0",
+    "dev:electron": "wait-on http://localhost:5173 dist/main/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "watch:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run clean && npm run build:electron && tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "dev:host": "npm run build:electron && concurrently -k \"npm:dev:vite\" \"npm:watch:electron\" \"npm:dev:electron:host\"",
+    "dev:viewer": "npm run build:electron && concurrently -k \"npm:dev:vite\" \"npm:watch:electron\" \"npm:dev:electron:viewer\"",
+    "dev:dual": "npm run build:electron && concurrently -k \"npm:dev:vite\" \"npm:watch:electron\" \"npm:dev:electron:dual\"",
+    "dev:electron:host": "wait-on http://localhost:5173 dist/main/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron . --mode=host",
+    "dev:electron:viewer": "wait-on http://localhost:5173 dist/main/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron . --mode=viewer",
+    "dev:electron:dual": "wait-on http://localhost:5173 dist/main/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 LAN_VIEWER_DUAL=1 electron . --dual",
+    "test": "vitest run src/**/*.test.ts",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "clean": "node -e 'require(\"fs\").rmSync(\"dist\",{recursive:true,force:true})'"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "qrcode": "^1.5.4",
+    "vite": "^7.0.0",
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.12",
+    "concurrently": "^9.0.0",
+    "cross-env": "^7.0.3",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.7",
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.local.lanscreenviewer",
+    "productName": "LAN Screen Viewer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "npmRebuild": false
+  }
+}
