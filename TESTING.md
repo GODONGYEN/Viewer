@@ -103,3 +103,95 @@ Host가 `PIN 포함 QR 생성`을 명시적으로 켠 경우에만 QR/연결 데
 - LAN 밖 인터넷 자동 접속
 - 방화벽, 보안 정책, 인증, CAPTCHA 우회
 - PIN을 UDP discovery 메시지에 포함하는 동작
+
+## TV Discovery 테스트
+
+TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접 연결을 시도하는 실험 기능입니다. 앱은 TV 승인, OS 권한, DRM, 방화벽, 인증을 우회하지 않습니다.
+
+### 같은 Wi-Fi에서 TV 탐지
+
+1. Host PC와 TV가 같은 Wi-Fi/LAN에 있는지 확인합니다.
+2. 앱을 실행하고 `TV Cast`를 누릅니다.
+3. `주변 TV 찾기`를 누릅니다.
+4. 발견된 기기 카드의 탐지 방식과 추정 프로토콜을 확인합니다.
+
+### AirPlay TV 테스트
+
+1. TV의 AirPlay 기능을 켭니다.
+2. macOS와 TV가 같은 네트워크에 있는지 확인합니다.
+3. TV Cast 모드에서 AirPlay 가능성이 있는 기기가 표시되는지 확인합니다.
+4. 기기 상세 패널에서 `AirPlay 연결 시작` 또는 `직접 연결 시도`를 누릅니다.
+5. TV 이름이 복사되고 macOS 디스플레이 설정이 열리는지 확인합니다.
+6. Screen Mirroring에서 사용자가 직접 TV를 선택하고, TV 코드가 나오면 직접 입력합니다.
+7. 타임라인에 `airplay / user-action-required`가 표시되는지 확인합니다.
+
+### Chromecast/Google TV 테스트
+
+1. Chromecast 또는 Google TV가 같은 네트워크에 있는지 확인합니다.
+2. TV Cast 모드에서 Chromecast/Google Cast 가능성이 표시되는지 확인합니다.
+3. 기기 상세 패널에서 `Chromecast 직접 연결`을 누릅니다.
+4. 타임라인에서 Cast V2 TLS 연결, `GET_STATUS`, Default Media Receiver `LAUNCH` 단계를 확인합니다.
+5. `테스트 미디어 재생`을 누르고 mp4, m4v, mov, mp3, jpg, png 중 하나를 선택합니다.
+6. 타임라인에서 media server 시작, Chromecast `LOAD`, media status 수신 여부를 확인합니다.
+7. `Chromecast 화면 스트림 옵션`에서 기본값 `Auto(HLS 우선) / 720p / 15fps / 2 Mbps`를 확인합니다.
+8. `Chromecast 화면 스트림 시작` 또는 `화면 스트림 캐스팅 실험`을 누르고 OS 화면 선택 권한을 직접 허용합니다.
+9. HLS playlist와 첫 segment 준비 후 Chromecast에 `LOAD` 되는지 확인합니다.
+10. TV에서 5초 이상 화면이 표시되면 성공으로 기록합니다.
+11. Auto에서 HLS가 실패하면 WebM 전략으로 자동 재시도되는지 타임라인을 확인합니다.
+12. WebM 단독 테스트는 방식 옵션을 `WebM live`로 바꾸고 다시 시도합니다.
+13. `화면 스트림 중지` 또는 `Cast 중지`를 눌렀을 때 캡처, MediaRecorder, stream server, Chromecast STOP이 정리되는지 확인합니다.
+
+### DLNA TV 테스트
+
+1. TV의 DLNA/UPnP Media Renderer 기능을 켭니다.
+2. TV Cast 모드에서 SSDP/DLNA 기기가 표시되는지 확인합니다.
+3. 기기 상세 패널에서 `DLNA 미디어 재생` 또는 `직접 연결 시도`를 누릅니다.
+4. mp4, m4v, mov, mp3, jpg, png 중 하나를 선택합니다.
+5. 타임라인에서 로컬 미디어 서버 시작, media URL 생성, DIDL-Lite metadata 포함 SetAVTransportURI, Play 단계를 확인합니다.
+6. TV에서 재생이 실패하면 코덱 미지원, controlURL 차이, 방화벽, AP isolation을 확인합니다.
+
+### Miracast TV 테스트
+
+1. TV의 무선 디스플레이 또는 Miracast 기능이 켜져 있는지 확인합니다.
+2. SSDP/UPnP 정보에 Miracast/WFD 힌트가 있는 경우 TV Cast 모드에 `Miracast possible`이 표시될 수 있습니다.
+3. Windows에서는 OS의 무선 디스플레이 연결 기능을 사용합니다.
+4. Windows에서는 `Windows 무선 디스플레이 연결 시작`을 눌러 OS 연결 화면이 열리는지 확인합니다.
+5. macOS/Electron에서 직접 Miracast 송신은 구현하지 않습니다.
+
+### TV 액션 패널 확인
+
+1. 발견된 TV 카드를 클릭합니다.
+2. IP, 탐지 방식, 추정 프로토콜, raw service type이 표시되는지 확인합니다.
+3. `직접 연결 시도` 버튼과 프로토콜별 액션 버튼이 표시되는지 확인합니다.
+4. 연결을 시도하면 `연결 상태 타임라인`에 connector별 로그가 쌓이는지 확인합니다.
+5. `가능한 것`, `아직 불가능한 것`, `보안/권한 안내`가 프로토콜에 맞게 표시되는지 확인합니다.
+6. `기기 정보 복사`를 누르고 클립보드에 진단용 JSON이 복사되는지 확인합니다.
+7. `디버그 discovery 정보`는 접힌 상태로 유지되고, 필요할 때만 열어 raw 정보를 확인합니다.
+
+### 실패 로그 수집
+
+1. TV 상세 패널의 `연결 상태 타임라인`을 확인합니다.
+2. connector, status, step, message를 기록합니다.
+3. `기기 정보 복사`로 discovery 정보를 복사합니다.
+4. TV 제조사/모델/펌웨어와 함께 `COMPATIBILITY.md` 형식으로 기록합니다.
+
+### 화면 스트림 실패 시 확인할 것
+
+- Mac/PC와 Chromecast가 같은 Wi-Fi/LAN인지 확인합니다.
+- 게스트 Wi-Fi 또는 AP isolation이 Chromecast의 HTTP stream URL 접근을 막지 않는지 확인합니다.
+- 방화벽이 Electron/Node의 임시 HTTP 서버 포트를 막지 않는지 확인합니다.
+- Auto는 HLS를 먼저 시도하고, 실패하면 WebM으로 자동 fallback합니다.
+- HLS 방식은 `ffmpeg-static`으로 변환하므로 CPU 사용량과 4~10초 지연이 생길 수 있습니다.
+- 타임라인에서 `chromecast-requested-playlist`, `chromecast-requested-segment`, `webm-client-connected`, `stream-http-404` 이벤트를 확인합니다.
+- Chromecast media status 오류가 타임라인에 표시되면 content type, codec, stream URL 접근성을 기록합니다.
+- 보호 콘텐츠/DRM 우회 목적의 화면은 테스트하지 않습니다.
+
+### TV가 보이지 않을 때
+
+- 같은 Wi-Fi/LAN인지 확인합니다.
+- 게스트 네트워크가 아닌지 확인합니다.
+- 공유기의 AP isolation/client isolation 설정을 확인합니다.
+- TV의 AirPlay, Chromecast, DLNA/UPnP 기능이 켜져 있는지 확인합니다.
+- VPN이 켜져 있으면 꺼보거나 올바른 네트워크 인터페이스를 사용합니다.
+- 방화벽이 mDNS(UDP 5353) 또는 SSDP(UDP 1900)를 막는지 확인합니다.
+- 학교/회사 네트워크에서는 멀티캐스트 탐색이 차단될 수 있습니다.

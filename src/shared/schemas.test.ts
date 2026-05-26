@@ -7,6 +7,15 @@ import {
   ViewerRequestMessageSchema
 } from "./schemas";
 import { getDirectedBroadcast, isPrivateIpv4, isPrivateOrLoopback } from "./network";
+import { mergeTvDevices } from "./tvActions";
+import { DLNAMediaRequestSchema, TVActionRequestSchema, TVDeviceSchema } from "./tvSchemas";
+import { getTvConnectorPlan } from "./tvConnectionPlan";
+import { TVConnectionEventSchema, TVConnectionStartRequestSchema } from "./tvConnectionSchemas";
+import { buildDidlLiteMetadata, buildSoapEnvelope, extractDlnaAvTransportService } from "../main/connectors/dlnaConnector";
+import { createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
+import { getBestLocalIp, getContentTypeForPath, getMediaTypeForPath } from "../main/mediaServer";
+import { chooseScreenStreamMimeType, getScreenStreamLimits } from "../main/screenStreamServer";
+import { getHlsReadyState } from "../main/hlsScreenStreamServer";
 
 describe("network helpers", () => {
   it("recognizes private IPv4 ranges", () => {
@@ -73,5 +82,211 @@ describe("schema validation", () => {
     expect(HostRegisterMessageSchema.safeParse({ type: "host-register", pin: "123456", pinExpiresAt: Date.now() + 60_000 }).success).toBe(true);
     expect(ViewerRequestMessageSchema.safeParse({ type: "viewer-request", pin: "000000", viewerName: "Viewer" }).success).toBe(true);
     expect(ViewerRequestMessageSchema.safeParse({ type: "viewer-request", pin: "bad" }).success).toBe(false);
+  });
+
+  it("validates TV discovery and action payloads", () => {
+    const device = {
+      id: "mdns:airplay:living-room",
+      name: "Living Room TV",
+      ipAddress: "192.168.1.30",
+      discoveryMethod: "mDNS",
+      protocol: "AirPlay",
+      connectable: "guide-only",
+      recommendedAction: "Use macOS Screen Mirroring.",
+      lastSeenAt: Date.now()
+    };
+
+    expect(TVDeviceSchema.safeParse(device).success).toBe(true);
+    expect(TVActionRequestSchema.safeParse({ deviceId: device.id, actionId: "copy-device-info", protocol: "AirPlay" }).success).toBe(true);
+    expect(TVActionRequestSchema.safeParse({ deviceId: device.id, actionId: "force-connect" }).success).toBe(false);
+  });
+
+  it("validates DLNA media requests without claiming screen mirroring", () => {
+    expect(
+      DLNAMediaRequestSchema.safeParse({
+        deviceId: "dlna-tv",
+        ipAddress: "192.168.1.31",
+        mediaPath: "/tmp/sample.mp4",
+        mediaType: "video",
+        fileName: "sample.mp4"
+      }).success
+    ).toBe(true);
+    expect(
+      DLNAMediaRequestSchema.safeParse({
+        deviceId: "dlna-tv",
+        ipAddress: "192.168.1.31",
+        mediaPath: "/tmp/sample.exe",
+        mediaType: "application",
+        fileName: "sample.exe"
+      }).success
+    ).toBe(false);
+  });
+
+  it("merges the same TV found through multiple protocols", () => {
+    const airplay = {
+      id: "mdns:airplay:tv",
+      name: "Living Room TV",
+      ipAddress: "192.168.1.30",
+      discoveryMethod: "mDNS" as const,
+      protocol: "AirPlay" as const,
+      connectable: "guide-only" as const,
+      recommendedAction: "Use macOS Screen Mirroring.",
+      serviceType: "airplay",
+      lastSeenAt: 100
+    };
+    const dlna = {
+      id: "ssdp:dlna:tv",
+      name: "Living Room TV",
+      ipAddress: "192.168.1.30",
+      discoveryMethod: "SSDP" as const,
+      protocol: "DLNA" as const,
+      connectable: "media-only" as const,
+      recommendedAction: "Use DLNA for media playback.",
+      serviceType: "urn:schemas-upnp-org:device:MediaRenderer:1",
+      lastSeenAt: 200
+    };
+
+    const merged = mergeTvDevices(airplay, dlna);
+    expect(merged.protocol).toBe("AirPlay");
+    expect(merged.protocols).toEqual(["AirPlay", "DLNA"]);
+    expect(merged.discoveryMethods).toEqual(["mDNS", "SSDP"]);
+  });
+
+  it("plans connector priority by detected TV protocols", () => {
+    const device = {
+      id: "tv",
+      name: "Living Room TV",
+      ipAddress: "192.168.1.30",
+      discoveryMethod: "mDNS" as const,
+      protocol: "Chromecast" as const,
+      protocols: ["DLNA", "Chromecast", "AirPlay"] as const,
+      connectable: "guide-only" as const,
+      recommendedAction: "Connect",
+      lastSeenAt: Date.now()
+    };
+
+    expect(getTvConnectorPlan(device).filter((attempt) => attempt.canAttempt).map((attempt) => attempt.connector)).toEqual(["chromecast", "airplay", "dlna"]);
+    expect(getTvConnectorPlan(device, { action: "play-dlna-media" }).filter((attempt) => attempt.canAttempt).map((attempt) => attempt.connector)).toEqual(["dlna"]);
+  });
+
+  it("validates TV connection requests and events", () => {
+    const device = {
+      id: "tv",
+      name: "Living Room TV",
+      ipAddress: "192.168.1.30",
+      discoveryMethod: "mDNS",
+      protocol: "Chromecast",
+      connectable: "guide-only",
+      recommendedAction: "Connect",
+      lastSeenAt: Date.now()
+    };
+    expect(TVConnectionStartRequestSchema.safeParse({ device, options: { action: "connect" } }).success).toBe(true);
+    expect(TVConnectionStartRequestSchema.safeParse({ device, options: { action: "force-connect" } }).success).toBe(false);
+    expect(
+      TVConnectionEventSchema.safeParse({
+        connectionId: "conn",
+        deviceId: "tv",
+        connector: "chromecast",
+        status: "connecting",
+        step: "probe",
+        message: "connecting",
+        timestamp: Date.now()
+      }).success
+    ).toBe(true);
+  });
+
+  it("extracts DLNA AVTransport controlURL and builds SOAP envelopes", () => {
+    const xml = `
+      <root><device><serviceList>
+        <service>
+          <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+          <controlURL>/upnp/control/AVTransport1</controlURL>
+        </service>
+      </serviceList></device></root>`;
+    const service = extractDlnaAvTransportService(xml, "http://192.168.1.30:1400/xml/device.xml");
+    expect(service?.controlUrl).toBe("http://192.168.1.30:1400/upnp/control/AVTransport1");
+    expect(buildSoapEnvelope("SetAVTransportURI", service?.serviceType ?? "", "http://192.168.1.2:5000/media/a&b")).toContain("a&amp;b");
+    expect(buildDidlLiteMetadata("http://192.168.1.2:5000/media/movie.mp4", "video/mp4", "Movie")).toContain("object.item.videoItem");
+  });
+
+  it("classifies media files and produces a private media server IP", () => {
+    expect(getMediaTypeForPath("/tmp/movie.mp4")).toBe("video");
+    expect(getMediaTypeForPath("/tmp/song.mp3")).toBe("audio");
+    expect(getMediaTypeForPath("/tmp/photo.png")).toBe("image");
+    expect(getMediaTypeForPath("/tmp/app.exe")).toBeNull();
+    expect(getContentTypeForPath("/tmp/movie.mp4")).toBe("video/mp4");
+    expect(getBestLocalIp()).toMatch(/^(\d+\.\d+\.\d+\.\d+)$/);
+  });
+
+  it("encodes Cast V2 messages and builds receiver/media payloads", () => {
+    const encoded = encodeCastMessage({
+      sourceId: "sender-1",
+      destinationId: "receiver-0",
+      namespace: "urn:x-cast:com.google.cast.receiver",
+      payloadUtf8: JSON.stringify({ type: "GET_STATUS", requestId: 1 })
+    });
+    const length = encoded.readUInt32BE(0);
+    expect(length).toBe(encoded.length - 4);
+    const decoded = decodeCastMessage(encoded.subarray(4));
+    expect(decoded.sourceId).toBe("sender-1");
+    expect(JSON.parse(decoded.payloadUtf8).type).toBe("GET_STATUS");
+    expect(createReceiverLaunchPayload(2)).toMatchObject({ type: "LAUNCH", appId: "CC1AD845", requestId: 2 });
+    expect(createMediaLoadPayload(3, "session", "http://192.168.1.2/media/movie.mp4", "video/mp4")).toMatchObject({
+      type: "LOAD",
+      media: { streamType: "BUFFERED", contentType: "video/mp4" }
+    });
+    expect(createMediaLoadPayload(4, "session", "http://192.168.1.2/screen.webm", "video/webm", "LIVE")).toMatchObject({
+      type: "LOAD",
+      media: { streamType: "LIVE", contentType: "video/webm" }
+    });
+  });
+
+  it("selects a screen stream MIME type", () => {
+    expect(chooseScreenStreamMimeType((mimeType) => mimeType === "video/webm")).toBe("video/webm");
+    expect(chooseScreenStreamMimeType(() => false)).toBe("");
+    expect(getScreenStreamLimits().maxChunkBytes).toBeGreaterThan(1024);
+  });
+
+  it("validates screen stream options", () => {
+    const device = {
+      id: "tv",
+      name: "Living Room TV",
+      ipAddress: "192.168.1.30",
+      discoveryMethod: "mDNS",
+      protocol: "Chromecast",
+      connectable: "guide-only",
+      recommendedAction: "Connect",
+      lastSeenAt: Date.now()
+    };
+    expect(
+      TVConnectionStartRequestSchema.safeParse({
+        device,
+        options: {
+          action: "start-screen-cast-experiment",
+          testMediaUrl: "http://192.168.1.2:3000/screen-stream/id/live.webm",
+          contentType: "video/webm",
+          streamType: "LIVE",
+          screenStreamStrategy: "auto",
+          screenStreamOptions: { strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 2 },
+          screenStreamSources: [
+            { id: "hls-1", url: "http://192.168.1.2:3000/hls/hls-1/index.m3u8", contentType: "application/vnd.apple.mpegurl", strategy: "hls" },
+            { id: "webm-1", url: "http://192.168.1.2:3000/screen-stream/webm-1/live.webm", contentType: "video/webm", strategy: "webm" }
+          ]
+        }
+      }).success
+    ).toBe(true);
+    expect(
+      TVConnectionStartRequestSchema.safeParse({
+        device,
+        options: {
+          action: "start-screen-cast-experiment",
+          screenStreamOptions: { strategy: "auto", resolution: "4k", fps: 60, bitrateMbps: 40 }
+        }
+      }).success
+    ).toBe(false);
+  });
+
+  it("reports missing HLS sessions as not ready", () => {
+    expect(getHlsReadyState("missing-session")).toMatchObject({ exists: false, playlistReady: false, segmentReady: false });
   });
 });

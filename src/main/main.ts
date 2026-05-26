@@ -3,6 +3,8 @@ import path from "node:path";
 import { setupDiscoveryIpc, stopDiscovery } from "./discovery";
 import { RunningSignalingServer, startSignalingServer } from "./signaling";
 import { SIGNALING_PORT } from "../shared/schemas";
+import { setupTvDiscoveryIpc, stopTvDiscoveryService } from "./tvDiscovery";
+import { setupTvConnectionIpc, stopTvConnectionService } from "./tvConnectionEngine";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL;
 let signalingServer: RunningSignalingServer | null = null;
@@ -21,7 +23,7 @@ function urlForMode(mode?: string) {
   return query;
 }
 
-function createWindow(mode?: "host" | "viewer") {
+function createWindow(mode?: "host" | "viewer" | "tv") {
   const mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
@@ -42,6 +44,8 @@ function createWindow(mode?: "host" | "viewer") {
   });
 
   setupDiscoveryIpc(mainWindow);
+  setupTvDiscoveryIpc(mainWindow);
+  setupTvConnectionIpc(mainWindow);
 
   if (devServerUrl) {
     mainWindow.loadURL(`${devServerUrl}${urlForMode(mode)}`);
@@ -55,7 +59,7 @@ function createWindow(mode?: "host" | "viewer") {
 function parseLaunchMode() {
   const modeArg = process.argv.find((arg) => arg.startsWith("--mode="));
   const mode = modeArg?.split("=")[1];
-  return mode === "host" || mode === "viewer" ? mode : undefined;
+  return mode === "host" || mode === "viewer" || mode === "tv" ? mode : undefined;
 }
 
 function isDualMode() {
@@ -109,6 +113,8 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   stopDiscovery();
+  stopTvDiscoveryService();
+  void stopTvConnectionService();
 
   if (process.platform !== "darwin") {
     app.quit();
@@ -117,5 +123,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   stopDiscovery();
+  stopTvDiscoveryService();
+  void stopTvConnectionService();
   void signalingServer?.close();
 });

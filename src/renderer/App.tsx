@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { HostFoundPayloadSchema, JoinPayload, JoinPayloadSchema, PIN_TTL_MS, SIGNALING_PORT } from "../shared/schemas";
+import { getDeviceMergeKey, getTvActions, getTvConnectionGuide, mergeTvDevices } from "../shared/tvActions";
+import type { TVAction, TVDevice, TVDiscoveryStatus } from "../shared/tvTypes";
+import type { ScreenStreamOptions, ScreenStreamSource, TVConnectionAction, TVConnectionEvent, TVConnectionStatus } from "../shared/tvConnectionTypes";
 
-type Mode = "home" | "host" | "viewer";
+type Mode = "home" | "host" | "viewer" | "tv";
 
 type HostRequest = {
   requestId: string;
@@ -16,6 +19,7 @@ type SignalPayload =
   | { kind: "ice"; candidate: RTCIceCandidateInit };
 
 const HOST_STALE_MS = 6000;
+const TV_STALE_MS = 45000;
 
 function createPin() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -27,7 +31,7 @@ function createHostId() {
 
 function getInitialMode(): Mode {
   const mode = new URLSearchParams(window.location.search).get("mode");
-  return mode === "host" || mode === "viewer" ? mode : "home";
+  return mode === "host" || mode === "viewer" || mode === "tv" ? mode : "home";
 }
 
 function toWebSocketUrl(input: string, fallbackPort = SIGNALING_PORT) {
@@ -157,6 +161,16 @@ export default function App() {
   const [qrPasteMessage, setQrPasteMessage] = useState("");
   const [manualOpen, setManualOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [tvDevices, setTvDevices] = useState<Record<string, TVDevice>>({});
+  const [tvStatus, setTvStatus] = useState<TVDiscoveryStatus>({ status: "idle" });
+  const [selectedTv, setSelectedTv] = useState<TVDevice | null>(null);
+  const [tvActionMessage, setTvActionMessage] = useState("");
+  const [showDlnaExperiment, setShowDlnaExperiment] = useState(false);
+  const [tvConnectionEvents, setTvConnectionEvents] = useState<TVConnectionEvent[]>([]);
+  const [activeTvConnectionId, setActiveTvConnectionId] = useState<string>("");
+  const [screenStreamOptions, setScreenStreamOptions] = useState<ScreenStreamOptions>({ strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 2 });
+  const [screenPreviewActive, setScreenPreviewActive] = useState(false);
+  const [lastScreenStreamSources, setLastScreenStreamSources] = useState<ScreenStreamSource[]>([]);
 
   const hostIdRef = useRef(createHostId());
   const hostSocketRef = useRef<WebSocket | null>(null);
@@ -164,9 +178,13 @@ export default function App() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const tvScreenPreviewRef = useRef<HTMLVideoElement | null>(null);
   const hostPeerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const viewerPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const viewerRequestIdRef = useRef<string | null>(null);
+  const tvScreenRecorderRef = useRef<MediaRecorder | null>(null);
+  const tvScreenStreamRef = useRef<MediaStream | null>(null);
+  const tvScreenStreamIdsRef = useRef<string[]>([]);
 
   function addLog(message: string) {
     setLogs((current) => [`${new Date().toLocaleTimeString()} ${message}`, ...current].slice(0, 80));
@@ -322,6 +340,58 @@ export default function App() {
   }, [mode]);
 
   useEffect(() => {
+    if (mode !== "tv") return;
+
+    window.tvDiscovery?.getTvDiscoveryStatus().then(setTvStatus);
+    const unsubscribeConnection = window.tvConnection?.onConnectionEvent((event) => {
+      setTvConnectionEvents((current) => [event, ...current].slice(0, 80));
+      addLog(`TV 연결: ${event.connector} / ${event.status} / ${event.step}`);
+    });
+    const unsubscribeDevice = window.tvDiscovery?.onTvDeviceFound((device) => {
+      const key = getDeviceMergeKey(device);
+      setTvDevices((current) => ({
+        ...current,
+        [key]: mergeTvDevices(current[key], device)
+      }));
+      setSelectedTv((current) => {
+        if (!current || getDeviceMergeKey(current) !== key) return current;
+        return mergeTvDevices(current, device);
+      });
+      addLog(`TV 발견: ${device.name} (${device.protocol})`);
+    });
+    const unsubscribeStatus = window.tvDiscovery?.onTvDiscoveryStatus((status) => {
+      setTvStatus(status);
+      if (status.message) addLog(status.message);
+    });
+    const staleTimer = window.setInterval(() => {
+      setTvDevices((current) => {
+        const cutoff = Date.now() - TV_STALE_MS;
+        const next: Record<string, TVDevice> = {};
+
+        for (const [key, device] of Object.entries(current)) {
+          if (device.lastSeenAt >= cutoff) {
+            next[key] = device;
+          } else {
+            addLog(`TV 목록에서 만료됨: ${device.name}`);
+          }
+        }
+
+        return next;
+      });
+    }, 5000);
+
+    return () => {
+      window.clearInterval(staleTimer);
+      unsubscribeConnection?.();
+      unsubscribeDevice?.();
+      unsubscribeStatus?.();
+      void window.tvDiscovery?.stopTvDiscovery();
+      void window.tvConnection?.stopAllConnections();
+      void stopChromecastScreenStream();
+    };
+  }, [mode]);
+
+  useEffect(() => {
     if (mode !== "viewer") return;
     if (Object.keys(discoveredHosts).length > 0) {
       setDiscoveryStatus("Host 발견됨");
@@ -338,6 +408,18 @@ export default function App() {
       setDiscoveryStatus("일정 시간 동안 발견 안 됨");
     }
   }, [discoveredHosts, discoveryStartedAt, mode, now]);
+
+  useEffect(() => {
+    if (!selectedTv) return;
+    const updated = tvDevices[getDeviceMergeKey(selectedTv)];
+    if (!updated) {
+      setSelectedTv(null);
+      return;
+    }
+    if (updated !== selectedTv) {
+      setSelectedTv(updated);
+    }
+  }, [selectedTv, tvDevices]);
 
   useEffect(() => {
     if (!isSharing || !hostNetworkInfo) {
@@ -822,7 +904,314 @@ export default function App() {
     hostSocketRef.current?.close();
     hostSocketRef.current = null;
     disconnectViewer();
+    void window.tvDiscovery?.stopTvDiscovery();
     setMode("home");
+  }
+
+  function startTvSearch() {
+    setTvDevices({});
+    setSelectedTv(null);
+    setTvActionMessage("");
+    setShowDlnaExperiment(false);
+    setTvConnectionEvents([]);
+    setActiveTvConnectionId("");
+    setTvStatus({ status: "searching", startedAt: Date.now(), message: "Searching with mDNS and SSDP." });
+    void window.tvDiscovery?.startTvDiscovery();
+    addLog("TV 탐색을 시작했습니다. mDNS와 SSDP를 사용합니다.");
+  }
+
+  function stopTvSearch() {
+    void window.tvDiscovery?.stopTvDiscovery();
+    setTvStatus({ status: "stopped", message: "TV discovery stopped." });
+    addLog("TV 탐색을 중지했습니다.");
+  }
+
+  function selectTv(device: TVDevice) {
+    setSelectedTv(device);
+    setTvActionMessage("");
+    setShowDlnaExperiment(false);
+    setTvConnectionEvents([]);
+  }
+
+  function formatList(values: string[] | undefined, fallback: string) {
+    return values?.length ? values.join(", ") : fallback;
+  }
+
+  async function copyTvDeviceInfo(device: TVDevice) {
+    const payload = {
+      name: device.name,
+      ipAddress: device.ipAddress,
+      protocols: device.protocols ?? [device.protocol],
+      discoveryMethods: device.discoveryMethods ?? [device.discoveryMethod],
+      serviceTypes: device.serviceTypes ?? (device.serviceType ? [device.serviceType] : []),
+      location: device.location,
+      note: "This is diagnostic connection metadata only. It does not grant access or bypass TV approval."
+    };
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    setTvActionMessage("기기 정보를 클립보드에 복사했습니다.");
+    addLog(`TV 기기 정보 복사: ${device.name}`);
+  }
+
+  async function handleTvAction(action: TVAction, device: TVDevice) {
+    if (action.disabled) {
+      setTvActionMessage(action.description);
+      return;
+    }
+
+    if (action.id === "copy-device-info") {
+      await copyTvDeviceInfo(device);
+      return;
+    }
+
+    if (action.id === "open-display-settings") {
+      const result = await window.tvDiscovery?.openMacDisplaySettings();
+      setTvActionMessage(result?.ok ? "macOS 디스플레이 설정을 열었습니다. TV 선택은 사용자가 직접 해야 합니다." : result?.message ?? "설정을 열 수 없습니다.");
+      return;
+    }
+
+    if (action.id === "open-screen-recording-settings") {
+      const result = await window.tvDiscovery?.openMacScreenRecordingSettings();
+      setTvActionMessage(result?.ok ? "macOS 화면 기록 권한 설정을 열었습니다. 권한 허용은 사용자가 직접 해야 합니다." : result?.message ?? "설정을 열 수 없습니다.");
+      return;
+    }
+
+    if (action.id === "dlna-media-experiment") {
+      setShowDlnaExperiment(true);
+      await startTvConnection(device, "play-dlna-media");
+      return;
+    }
+
+    if (action.id === "airplay-start") {
+      await startTvConnection(device, "airplay-start");
+      return;
+    }
+
+    if (action.id === "chromecast-connect") {
+      await startTvConnection(device, "connect");
+      return;
+    }
+
+    if (action.id === "chromecast-test-media") {
+      await startTvConnection(device, "cast-test-media");
+      return;
+    }
+
+    if (action.id === "chromecast-screen-experiment") {
+      await startTvConnection(device, "start-screen-cast-experiment");
+      return;
+    }
+
+    if (action.id === "miracast-start") {
+      await startTvConnection(device, "miracast-start");
+      return;
+    }
+
+    if (action.id === "cast-stop") {
+      await stopActiveTvConnection();
+      return;
+    }
+
+    setTvActionMessage(action.description);
+  }
+
+  async function startTvConnection(device: TVDevice, action: TVConnectionAction = "connect") {
+    let mediaFilePath: string | undefined;
+    let testMediaUrl: string | undefined;
+    let contentType: string | undefined;
+    let streamType: "BUFFERED" | "LIVE" | undefined;
+    let screenStreamSources: ScreenStreamSource[] | undefined;
+
+    if (action === "play-dlna-media" || action === "cast-test-media") {
+      const selected = await window.tvConnection?.selectDlnaMedia();
+      if (!selected?.ok || !selected.filePath) {
+        setTvActionMessage(selected?.message ?? "미디어 파일 선택이 취소되었습니다.");
+        return;
+      }
+      mediaFilePath = selected.filePath;
+      setTvActionMessage(`${selected.fileName} 파일을 ${action === "play-dlna-media" ? "DLNA TV" : "Chromecast"}로 재생 요청합니다.`);
+    }
+
+    if (action === "start-screen-cast-experiment") {
+      const screenStream = await startChromecastScreenStream(device, screenStreamOptions);
+      if (!screenStream) return;
+      screenStreamSources = screenStream.sources;
+      setLastScreenStreamSources(screenStream.sources);
+      testMediaUrl = screenStream.sources[0]?.url;
+      contentType = screenStream.sources[0]?.contentType;
+      streamType = "LIVE";
+    }
+
+    const response = await window.tvConnection?.connectToTv({
+      device,
+      options: { action, mediaFilePath, testMediaUrl, contentType, streamType, screenStreamStrategy: screenStreamOptions.strategy, screenStreamOptions, screenStreamSources }
+    });
+    if (!response?.ok || !response.connectionId) {
+      setTvActionMessage(response?.message ?? "TV 연결 시도를 시작하지 못했습니다.");
+      return;
+    }
+
+    setActiveTvConnectionId(response.connectionId);
+    setTvActionMessage("TV 직접 연결 시도를 시작했습니다. 아래 타임라인에서 진행 상태를 확인하세요.");
+  }
+
+  function chooseRecorderMimeType() {
+    const candidates = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"];
+    return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+  }
+
+  async function startChromecastScreenStream(device: TVDevice, options: ScreenStreamOptions): Promise<{ sources: ScreenStreamSource[] } | null> {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setTvActionMessage("이 환경에서는 화면 캡처 API를 사용할 수 없습니다.");
+      return null;
+    }
+
+    const mimeType = chooseRecorderMimeType();
+    if (!mimeType) {
+      setTvActionMessage("MediaRecorder가 지원하는 WebM MIME type을 찾지 못했습니다.");
+      return null;
+    }
+
+    try {
+      const height = options.resolution === "1080p" ? 1080 : 720;
+      const width = options.resolution === "1080p" ? 1920 : 1280;
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: options.fps, max: options.fps } },
+        audio: false
+      });
+      const strategies: Array<"hls" | "webm"> = options.strategy === "hls" ? ["hls"] : options.strategy === "webm" ? ["webm"] : ["hls", "webm"];
+      const sources: ScreenStreamSource[] = [];
+
+      for (const strategy of strategies) {
+        const session = await window.tvConnection?.startScreenStream({ targetIp: device.ipAddress, deviceId: device.id, contentType: mimeType, strategy, options });
+        if (session?.ok && session.id && session.url && session.contentType && session.strategy) {
+          sources.push({ id: session.id, url: session.url, contentType: session.contentType, strategy: session.strategy });
+        } else if (options.strategy !== "auto") {
+          stream.getTracks().forEach((track) => track.stop());
+          setTvActionMessage(session?.message ?? "화면 스트림 서버를 시작하지 못했습니다.");
+          return null;
+        }
+      }
+
+      if (sources.length === 0) {
+        stream.getTracks().forEach((track) => track.stop());
+        setTvActionMessage("HLS/WebM 화면 스트림 세션을 시작하지 못했습니다.");
+        return null;
+      }
+
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: options.bitrateMbps * 1_000_000 });
+      tvScreenStreamRef.current = stream;
+      tvScreenRecorderRef.current = recorder;
+      tvScreenStreamIdsRef.current = sources.map((source) => source.id);
+      setScreenPreviewActive(true);
+      window.setTimeout(() => {
+        if (tvScreenPreviewRef.current) {
+          tvScreenPreviewRef.current.srcObject = stream;
+        }
+      }, 0);
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size === 0) return;
+        void event.data.arrayBuffer().then((chunk) => {
+          for (const streamId of tvScreenStreamIdsRef.current) {
+            void window.tvConnection?.pushScreenStreamChunk({ streamId, chunk });
+          }
+        });
+      };
+      recorder.onerror = () => {
+        setTvActionMessage("화면 스트림 MediaRecorder 오류가 발생했습니다.");
+      };
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        void stopChromecastScreenStream();
+      });
+      recorder.start(sources.some((source) => source.strategy === "hls") ? 750 : 1000);
+      setTvActionMessage(
+        `화면 캡처가 시작되었습니다. ${sources.map((source) => source.strategy.toUpperCase()).join(" → ")} 전략으로 Chromecast LOAD를 시도합니다. Auto는 HLS를 먼저 사용합니다.`
+      );
+      return { sources };
+    } catch (error) {
+      setTvActionMessage(error instanceof Error ? `화면 캡처 시작 실패: ${error.message}` : "화면 캡처 시작에 실패했습니다.");
+      return null;
+    }
+  }
+
+  async function stopChromecastScreenStream() {
+    if (tvScreenRecorderRef.current?.state !== "inactive") {
+      tvScreenRecorderRef.current?.stop();
+    }
+    tvScreenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (tvScreenPreviewRef.current) {
+      tvScreenPreviewRef.current.srcObject = null;
+    }
+    tvScreenRecorderRef.current = null;
+    tvScreenStreamRef.current = null;
+    setScreenPreviewActive(false);
+    if (tvScreenStreamIdsRef.current.length) {
+      for (const streamId of tvScreenStreamIdsRef.current) {
+        await window.tvConnection?.stopScreenStream(streamId);
+      }
+      tvScreenStreamIdsRef.current = [];
+    }
+  }
+
+  async function stopActiveTvConnection() {
+    if (!activeTvConnectionId) {
+      setTvActionMessage("중지할 활성 TV 연결이 없습니다.");
+      return;
+    }
+    const result = await window.tvConnection?.stopConnection(activeTvConnectionId);
+    await stopChromecastScreenStream();
+    setTvActionMessage(result?.ok ? "TV 연결 중지 요청을 보냈습니다." : result?.message ?? "TV 연결 중지에 실패했습니다.");
+    if (result?.ok) setActiveTvConnectionId("");
+  }
+
+  function addManualTvConnectionEvent(device: TVDevice, status: TVConnectionStatus, message: string) {
+    const event: TVConnectionEvent = {
+      connectionId: activeTvConnectionId || `manual-${Date.now()}`,
+      deviceId: device.id,
+      connector: "diagnostic",
+      status,
+      step: "User confirmation",
+      message,
+      timestamp: Date.now()
+    };
+    setTvConnectionEvents((current) => [event, ...current].slice(0, 80));
+  }
+
+  async function copyTvFailureLog() {
+    const payload = tvConnectionEvents.map((event) => ({
+      time: new Date(event.timestamp).toISOString(),
+      connector: event.connector,
+      status: event.status,
+      step: event.step,
+      message: event.message,
+      details: event.details
+    }));
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    setTvActionMessage("실패/연결 로그를 클립보드에 복사했습니다. COMPATIBILITY.md에 붙여 기록할 수 있습니다.");
+  }
+
+  async function copyStreamUrls() {
+    if (lastScreenStreamSources.length === 0) {
+      setTvActionMessage("복사할 화면 스트림 URL이 아직 없습니다.");
+      return;
+    }
+    await navigator.clipboard.writeText(JSON.stringify(lastScreenStreamSources, null, 2));
+    setTvActionMessage("최근 화면 스트림 URL을 클립보드에 복사했습니다.");
+  }
+
+  function diagnoseStreamRequests() {
+    const streamEvents = tvConnectionEvents.filter((event) => event.step.includes("stream") || event.step.includes("hls") || event.step.includes("webm") || event.step.includes("chromecast-requested"));
+    const requested = streamEvents.some((event) => event.step.includes("requested") || event.step.includes("client-connected"));
+    setTvActionMessage(requested ? "Chromecast/클라이언트가 스트림 URL을 요청한 기록이 있습니다. 타임라인의 HTTP 200/404 이벤트를 확인하세요." : "아직 Chromecast가 스트림 URL을 요청한 기록이 없습니다. 방화벽, AP isolation, LAN IP 접근성을 확인하세요.");
+  }
+
+  function getPrimaryTvActionLabel(device: TVDevice) {
+    const protocols = device.protocols ?? [device.protocol];
+    if (protocols.includes("Chromecast")) return "Cast 연결";
+    if (protocols.includes("AirPlay")) return "AirPlay 연결";
+    if (protocols.includes("DLNA")) return "미디어 재생";
+    if (protocols.includes("Miracast possible")) return "무선 디스플레이 연결";
+    return "연결 시도";
   }
 
   const discoveredHostList = Object.values(discoveredHosts).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
@@ -832,6 +1221,9 @@ export default function App() {
   const viewerElapsed = mode === "viewer" && discoveryStartedAt ? now - discoveryStartedAt : 0;
   const showBasicDiagnosis = mode === "viewer" && discoveredHostList.length === 0 && viewerElapsed >= 5000;
   const showDetailedDiagnosis = mode === "viewer" && discoveredHostList.length === 0 && viewerElapsed >= 15000;
+  const tvDeviceList = Object.values(tvDevices).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  const selectedTvGuide = selectedTv ? getTvConnectionGuide(selectedTv) : null;
+  const selectedTvActions = selectedTv ? getTvActions(selectedTv) : [];
 
   return (
     <main className="app-shell">
@@ -864,6 +1256,9 @@ export default function App() {
           </button>
           <button className="choice-button viewer-choice" onClick={() => setMode("viewer")}>
             Viewer로 시작
+          </button>
+          <button className="choice-button tv-choice" onClick={() => setMode("tv")}>
+            TV Cast
           </button>
         </section>
       )}
@@ -1193,6 +1588,286 @@ export default function App() {
           <div className="remote-stage">
             <video ref={remoteVideoRef} autoPlay playsInline />
             <span className="stage-label">{viewerStatus}</span>
+          </div>
+        </section>
+      )}
+
+      {mode === "tv" && (
+        <section className="workspace tv-grid">
+          <div className="panel tv-controls">
+            <div className="panel-header">
+              <h2>TV Cast</h2>
+              <span className="status">{tvStatus.status === "searching" ? "검색 중" : tvStatus.status}</span>
+            </div>
+
+            <p className="muted">
+              같은 Wi-Fi/LAN의 AirPlay, Chromecast/Google Cast, DLNA/UPnP 가능 기기를 찾고, 허용된 프로토콜로 직접 연결을 시도합니다. TV 승인과 OS 권한은 우회하지 않습니다.
+            </p>
+
+            <div className="button-row">
+              <button onClick={startTvSearch}>주변 TV 찾기</button>
+              <button className="ghost-button" onClick={startTvSearch}>
+                새로고침
+              </button>
+              <button className="danger-button" onClick={stopTvSearch}>
+                중지
+              </button>
+            </div>
+
+            {tvStatus.message && <p className="muted">{tvStatus.message}</p>}
+
+            <div className="host-card-list">
+              {tvDeviceList.length === 0 && (
+                <div className="empty-state">
+                  <strong>발견된 TV가 없습니다.</strong>
+                  <span>TV의 AirPlay, Chromecast, DLNA 기능이 켜져 있고 같은 Wi-Fi에 있는지 확인하세요.</span>
+                </div>
+              )}
+
+              {tvDeviceList.map((device) => (
+                <div className={selectedTv && getDeviceMergeKey(selectedTv) === getDeviceMergeKey(device) ? "host-card selected tv-device-card" : "host-card tv-device-card"} key={getDeviceMergeKey(device)}>
+                  <button className="card-main-button" onClick={() => selectTv(device)}>
+                    <span className="host-card-title">{device.name}</span>
+                    <span>{formatAge(device.lastSeenAt, now)}</span>
+                    <span>{device.ipAddress || "IP 확인 중"}</span>
+                    <span>{formatList(device.discoveryMethods, device.discoveryMethod)}</span>
+                    <span>{device.connectable === "media-only" ? "미디어 재생 적합" : device.connectable === "guide-only" ? "직접/OS 연결 시도" : "확인 필요"}</span>
+                    <span className="badge-row">
+                      {(device.protocols ?? [device.protocol]).map((protocol) => (
+                        <span className="protocol-badge" key={protocol}>
+                          {protocol}
+                        </span>
+                      ))}
+                    </span>
+                  </button>
+                  <button className="ghost-button compact-action" onClick={() => void startTvConnection(device)}>
+                    {getPrimaryTvActionLabel(device)}
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="diagnosis-panel detailed">
+              <strong>TV 탐색 진단</strong>
+              <ul>
+                <li>Host PC와 TV가 같은 Wi-Fi/LAN인지 확인하세요.</li>
+                <li>게스트 네트워크나 AP isolation은 mDNS/SSDP를 막을 수 있습니다.</li>
+                <li>TV의 AirPlay, Chromecast, DLNA/UPnP 기능이 켜져 있는지 확인하세요.</li>
+                <li>VPN이나 방화벽이 UDP 5353(mDNS), UDP 1900(SSDP)을 막을 수 있습니다.</li>
+                <li>Miracast는 Windows 무선 디스플레이 기능이 우선이며 macOS/Electron에서 직접 구현하지 않습니다.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">
+              <h2>연결 안내</h2>
+              <span className="status">{selectedTv ? formatList(selectedTv.protocols, selectedTv.protocol) : "선택 대기"}</span>
+            </div>
+
+            {!selectedTv && <p className="muted">발견된 TV를 선택하면 지원 가능 프로토콜과 권장 연결 방법을 표시합니다.</p>}
+
+            {selectedTv && selectedTvGuide && (
+              <div className="tv-guide">
+                <h3>{selectedTv.name}</h3>
+
+                <div className="status-grid">
+                  <span>IP</span>
+                  <strong>{selectedTv.ipAddress || "알 수 없음"}</strong>
+                  <span>탐지 방식</span>
+                  <strong>{formatList(selectedTv.discoveryMethods, selectedTv.discoveryMethod)}</strong>
+                  <span>추정 프로토콜</span>
+                  <strong>{formatList(selectedTv.protocols, selectedTv.protocol)}</strong>
+                  <span>raw type</span>
+                  <strong>{formatList(selectedTv.serviceTypes, selectedTv.serviceType ?? "확인 안 됨")}</strong>
+                  <span>연결 가능성</span>
+                  <strong>{selectedTv.connectable === "media-only" ? "미디어 재생 중심" : selectedTv.connectable === "guide-only" ? "공식 연결 안내" : "확인 필요"}</strong>
+                </div>
+
+                <div className="diagnosis-panel">
+                  <strong>권장 연결 방법</strong>
+                  <p>{selectedTv.recommendedAction}</p>
+                  <ul>
+                    {selectedTvGuide.steps.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="tv-action-panel">
+                  <strong>직접 연결 시도</strong>
+                  <p className="muted">앱이 감지된 프로토콜 우선순위에 따라 connector를 선택하고, 실패하면 가능한 fallback connector를 이어서 시도합니다.</p>
+                  <div className="button-row">
+                    <button onClick={() => void startTvConnection(selectedTv)}>직접 연결 시도</button>
+                    {(selectedTv.protocols ?? [selectedTv.protocol]).includes("DLNA") && (
+                      <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "play-dlna-media")}>
+                        DLNA로 시도
+                      </button>
+                    )}
+                    {(selectedTv.protocols ?? [selectedTv.protocol]).includes("Chromecast") && (
+                      <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "cast-test-media")}>
+                        Chromecast로 다시 시도
+                      </button>
+                    )}
+                    <button className="danger-button" onClick={() => void stopActiveTvConnection()}>
+                      연결 중지
+                    </button>
+                  </div>
+                </div>
+
+                {(selectedTv.protocols ?? [selectedTv.protocol]).includes("Chromecast") && (
+                  <div className="tv-action-panel">
+                    <strong>Chromecast 화면 스트림 옵션</strong>
+                    <div className="stream-option-grid">
+                      <label>
+                        방식
+                        <select
+                          value={screenStreamOptions.strategy}
+                          onChange={(event) => setScreenStreamOptions((current) => ({ ...current, strategy: event.target.value as ScreenStreamOptions["strategy"] }))}
+                        >
+                          <option value="auto">Auto(HLS 우선)</option>
+                          <option value="webm">WebM live</option>
+                          <option value="hls">HLS fallback</option>
+                        </select>
+                      </label>
+                      <label>
+                        해상도
+                        <select
+                          value={screenStreamOptions.resolution}
+                          onChange={(event) => setScreenStreamOptions((current) => ({ ...current, resolution: event.target.value as ScreenStreamOptions["resolution"] }))}
+                        >
+                          <option value="720p">720p</option>
+                          <option value="1080p">1080p</option>
+                        </select>
+                      </label>
+                      <label>
+                        FPS
+                        <select
+                          value={screenStreamOptions.fps}
+                          onChange={(event) => setScreenStreamOptions((current) => ({ ...current, fps: Number(event.target.value) as ScreenStreamOptions["fps"] }))}
+                        >
+                          <option value={15}>15</option>
+                          <option value={30}>30</option>
+                        </select>
+                      </label>
+                      <label>
+                        비트레이트
+                        <select
+                          value={screenStreamOptions.bitrateMbps}
+                          onChange={(event) => setScreenStreamOptions((current) => ({ ...current, bitrateMbps: Number(event.target.value) as ScreenStreamOptions["bitrateMbps"] }))}
+                        >
+                          <option value={2}>2 Mbps</option>
+                          <option value={4}>4 Mbps</option>
+                          <option value={6}>6 Mbps</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="button-row">
+                      <button onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment")}>Chromecast 화면 스트림 시작</button>
+                      <button className="ghost-button" onClick={diagnoseStreamRequests}>스트림 URL 진단</button>
+                      <button className="ghost-button" onClick={() => void copyStreamUrls()}>스트림 URL 복사</button>
+                      <button className="danger-button" onClick={() => void stopActiveTvConnection()}>
+                        화면 스트림 중지
+                      </button>
+                    </div>
+                    <p className="muted">공유할 화면은 다음 단계에서 OS 선택 창으로 직접 고릅니다. Chromecast 안정성을 위해 Auto는 HLS를 먼저 시도합니다. 기본은 720p / 15fps / 2 Mbps입니다.</p>
+                    {screenPreviewActive && (
+                      <div className="screen-preview">
+                        <video ref={tvScreenPreviewRef} autoPlay muted playsInline />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="tv-action-panel">
+                  <strong>프로토콜별 액션</strong>
+                  <div className="tv-action-grid">
+                    {selectedTvActions.map((action) => (
+                      <button
+                        className={action.availability === "experimental" ? "ghost-button experimental-action" : "ghost-button"}
+                        disabled={action.disabled}
+                        key={`${action.id}:${action.protocol ?? "common"}`}
+                        onClick={() => void handleTvAction(action, selectedTv)}
+                        title={action.description}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                  {tvActionMessage && <p className="muted">{tvActionMessage}</p>}
+                </div>
+
+                <div className="connection-timeline">
+                  <strong>연결 상태 타임라인</strong>
+                  <div className="button-row">
+                    <button className="ghost-button" onClick={() => void copyTvFailureLog()}>
+                      실패 로그 복사
+                    </button>
+                    <button className="ghost-button" onClick={() => addManualTvConnectionEvent(selectedTv, "playing", "사용자가 TV 연결 성공을 확인했습니다.")}>
+                      연결됨으로 표시
+                    </button>
+                    <button className="ghost-button" onClick={() => addManualTvConnectionEvent(selectedTv, "failed", "사용자가 TV 연결 실패를 기록했습니다.")}>
+                      실패로 표시
+                    </button>
+                  </div>
+                  {tvConnectionEvents.length === 0 && <p className="muted">아직 연결 시도 로그가 없습니다.</p>}
+                  <ol>
+                    {tvConnectionEvents.map((event) => (
+                      <li key={`${event.connectionId}:${event.timestamp}:${event.step}`}>
+                        <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
+                        <strong>
+                          {event.connector} / {event.status}
+                        </strong>
+                        <p>{event.step}: {event.message}</p>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+
+                {showDlnaExperiment && (
+                  <div className="diagnosis-panel">
+                    <strong>DLNA 미디어 재생</strong>
+                    <p>
+                      파일 선택은 main process dialog에서 수행되고, 로컬 HTTP 서버와 AVTransport SOAP으로 TV 재생을 시도합니다. TV 코덱/펌웨어에 따라 실패할 수 있습니다.
+                    </p>
+                    <p className="muted">지원 후보: mp4, m4v, mov, mp3, jpg, png. DRM/보호 콘텐츠 우회는 지원하지 않습니다.</p>
+                  </div>
+                )}
+
+                <div className="split-lists">
+                  <div className="diagnosis-panel">
+                    <strong>가능한 것</strong>
+                    <ul>
+                      {selectedTvGuide.possibleActions.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="diagnosis-panel">
+                    <strong>아직 불가능한 것</strong>
+                    <ul>
+                      {selectedTvGuide.unavailableActions.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="diagnosis-panel">
+                  <strong>보안/권한 안내</strong>
+                  <ul>
+                    {selectedTvGuide.securityNotes.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <details className="debug-details">
+                  <summary>디버그 discovery 정보</summary>
+                  <pre>{JSON.stringify({ details: selectedTv.details, location: selectedTv.location, raw: selectedTv.raw }, null, 2)}</pre>
+                </details>
+              </div>
+            )}
           </div>
         </section>
       )}
