@@ -28,3 +28,36 @@ contextBridge.exposeInMainWorld("lanDiscovery", {
     return () => ipcRenderer.removeListener("lan-discovery:event", listener);
   }
 });
+
+contextBridge.exposeInMainWorld("tvDiscovery", {
+  startTvDiscovery: () => ipcRenderer.invoke("tv-discovery:start"),
+  stopTvDiscovery: () => ipcRenderer.invoke("tv-discovery:stop"),
+  getTvDiscoveryStatus: () => ipcRenderer.invoke("tv-discovery:get-status"),
+  openMacDisplaySettings: () => ipcRenderer.invoke("tv-discovery:open-display-settings"),
+  openMacScreenRecordingSettings: () => ipcRenderer.invoke("tv-discovery:open-screen-recording-settings"),
+  onTvDeviceFound: (callback: (device: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, device: unknown) => callback(device);
+    ipcRenderer.on("tv-discovery:device-found", listener);
+    return () => ipcRenderer.removeListener("tv-discovery:device-found", listener);
+  },
+  onTvDiscoveryStatus: (callback: (status: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
+    ipcRenderer.on("tv-discovery:status", listener);
+    return () => ipcRenderer.removeListener("tv-discovery:status", listener);
+  }
+});
+
+contextBridge.exposeInMainWorld("tvConnection", {
+  connectToTv: (payload: unknown) => ipcRenderer.invoke("tv-connection:connect", payload),
+  stopConnection: (connectionId: string) => ipcRenderer.invoke("tv-connection:stop", connectionId),
+  selectDlnaMedia: () => ipcRenderer.invoke("tv-connection:select-dlna-media"),
+  startScreenStream: (payload: unknown) => ipcRenderer.invoke("tv-connection:screen-stream-start", payload),
+  pushScreenStreamChunk: (payload: unknown) => ipcRenderer.invoke("tv-connection:screen-stream-push", payload),
+  stopScreenStream: (streamId: string) => ipcRenderer.invoke("tv-connection:screen-stream-stop", streamId),
+  stopAllConnections: () => ipcRenderer.invoke("tv-connection:stop-all"),
+  onConnectionEvent: (callback: (event: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, connectionEvent: unknown) => callback(connectionEvent);
+    ipcRenderer.on("tv-connection:event", listener);
+    return () => ipcRenderer.removeListener("tv-connection:event", listener);
+  }
+});

@@ -2,7 +2,9 @@
 
 Consent-first screen sharing for trusted devices on the same LAN/Wi-Fi.
 
-LAN Screen Viewer is an Electron + React + TypeScript app for local screen sharing in homes, classrooms, labs, and small teams. A Host must explicitly start screen sharing and approve each Viewer before WebRTC signaling can proceed.
+LAN Screen Viewer is an Electron + React + TypeScript app for local screen sharing in homes, classrooms, labs, and small teams. It currently supports PC-to-PC LAN screen sharing and includes an experimental TV Cast Controller mode for finding nearby AirPlay, Chromecast/Google Cast, DLNA, and Miracast-like devices.
+
+The long-term direction is a TV Cast Controller. When a TV is detected, the app now tries the safest direct connection path that matches the TV protocol. It still does not force, automate, or bypass TV/OS approval.
 
 ## Features
 
@@ -18,6 +20,13 @@ LAN Screen Viewer is an Electron + React + TypeScript app for local screen shari
 - Discovery failure diagnostics
 - WebRTC/signaling status logs
 - Multi-Viewer Host peer connection handling
+- Experimental TV Cast mode for AirPlay/Chromecast/DLNA/Miracast hints
+- Protocol-specific TV action panels and connection guides
+- TVConnectionEngine with protocol-specific connectors
+- DLNA media playback experiment using a local HTTP server and UPnP AVTransport SOAP
+- Chromecast Cast V2 connection, Default Media Receiver launch, media LOAD, and screen stream casting
+- AirPlay and Miracast OS connection flow launchers
+- TV protocol connection attempts without forced or unauthorized connection
 
 ## Security Principles
 
@@ -41,6 +50,8 @@ This app is designed for voluntary local screen sharing only. It does not suppor
 - WebRTC
 - Node.js HTTP/WebSocket signaling
 - UDP broadcast discovery
+- mDNS/Bonjour TV discovery
+- SSDP/UPnP TV discovery
 - zod validation
 - qrcode
 - Vite
@@ -109,6 +120,66 @@ Viewer can connect by one of three methods:
 
 The Host must still approve the request before any WebRTC media is received.
 
+## TV Cast Mode
+
+Click `TV Cast` to search for nearby TVs and casting devices on the same LAN.
+
+Current experimental support:
+
+- AirPlay-like devices through mDNS/Bonjour
+- Chromecast/Google Cast-like devices through mDNS/Bonjour
+- DLNA/UPnP Media Renderers through SSDP
+- Miracast hints when SSDP/UPnP data suggests wireless display support
+
+The app merges duplicate discoveries from the same TV, shows protocol badges, and opens a detail panel with direct connection actions, unsupported actions, security notes, and a connector timeline.
+
+### TVConnectionEngine
+
+When you click `직접 연결 시도`, the main process chooses connectors in this order when the detected protocols allow it:
+
+1. Chromecast
+2. AirPlay
+3. DLNA
+4. Miracast
+
+Each connector reports status events such as protocol analysis, connector selected, connecting, media URL created, playing, user action required, failed, and stopped.
+
+### AirPlay Guidance
+
+On macOS, AirPlay Screen Mirroring is usually the practical path for TV mirroring. If an AirPlay-capable TV is detected, the app copies the TV name and opens macOS Display settings so the user can select the TV manually. AirPlay codes and approval are never bypassed.
+
+### Chromecast Guidance
+
+If a Chromecast or Google TV-like device is detected, the app uses a built-in Cast V2 client instead of vulnerable Cast packages. It opens a TLS connection to port `8009`, sends Cast V2 framed protobuf messages, launches the Default Media Receiver (`CC1AD845`), and can send a media `LOAD` request for a selected local file, WebM live screen stream, or HLS fallback stream.
+
+### Chromecast Screen Stream
+
+The screen stream flow is:
+
+1. User clicks `Chromecast 화면 스트림 시작`.
+2. The renderer calls `getDisplayMedia` after the user action.
+3. `MediaRecorder` encodes WebM chunks.
+4. The main process serves either a WebM chunked stream or an HLS playlist through the LAN HTTP stream server.
+5. Chromecast receives a `LOAD` request with `streamType: LIVE`.
+
+Default options are `720p`, `15fps`, `2 Mbps`, and `Auto(HLS first)`. Auto starts HLS and WebM sessions from the same user-approved capture, waits for the HLS playlist and first segment before sending Chromecast `LOAD`, and falls back to WebM if the HLS strategy fails. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility, with a few seconds of latency.
+
+### DLNA Guidance
+
+DLNA is better suited for media file playback than full-screen mirroring. This app can select a local media file, serve it from a temporary local HTTP server, find AVTransport from the TV description XML, send `SetAVTransportURI`, and send `Play`. TV codec support varies by model.
+
+### Miracast Guidance
+
+Miracast is mainly a Windows wireless display path. This app may show a Miracast hint when discovery data suggests it, but it does not implement Miracast transmission. On macOS, check AirPlay first.
+
+### Current Direct Connection Status
+
+- Chromecast: direct Cast V2 TLS connection, `GET_STATUS`, Default Media Receiver `LAUNCH`, media `LOAD`, media `STOP`, WebM live stream, and HLS fallback.
+- DLNA: experimental media file playback through local HTTP + AVTransport SOAP with DIDL-Lite metadata and HTTP Range support.
+- AirPlay: macOS connection flow launcher; user must select the TV and approve codes.
+- Miracast: Windows Wireless Display settings launcher; user must select the TV.
+- Screen stream casting: explicit user-triggered `getDisplayMedia` + MediaRecorder WebM chunks + optional ffmpeg HLS fallback; no DRM/protected content bypass.
+
 ## LAN Discovery
 
 When Host screen sharing is active, the app broadcasts a discovery payload on UDP port `45454`. The payload includes the Host name, Host ID, LAN WebSocket URL, selected IP, and expiry time. It does not include the PIN.
@@ -158,12 +229,14 @@ The app does not bypass this permission.
 ## Troubleshooting
 
 - Make sure Host and Viewer are on the same Wi-Fi/LAN.
+- Make sure the TV is on the same Wi-Fi/LAN.
 - Avoid guest Wi-Fi for local sharing.
 - Disable AP isolation/client isolation if you control the router.
-- Check macOS/Windows firewall prompts for Node/Electron.
+- Check macOS/Windows firewall prompts for Node/Electron, mDNS, and SSDP.
 - Temporarily disable VPN or select the correct physical interface.
 - Use the Host network selector to avoid Docker/VM/VPN adapters.
 - Use QR or manual fallback when UDP broadcast is blocked.
+- Ensure AirPlay, Chromecast, or DLNA/UPnP is enabled on the TV.
 
 ## Build And Package
 
@@ -197,6 +270,7 @@ Apple signing and notarization are not configured yet. Unsigned builds are inten
 
 ```bash
 npm run typecheck
+npm run build
 npm run test
 npm audit
 ```
@@ -215,9 +289,11 @@ npm audit
 ## Future Work
 
 - Camera-based QR scanning
-- mDNS/Bonjour discovery
 - Stronger multi-window automated Electron tests
 - Optional ICE diagnostics and relay configuration for explicitly managed, consent-based deployments
+- Broader Cast V2 receiver/media status compatibility handling
+- Chromecast receiver status telemetry and more detailed automatic fallback heuristics based on real TV media status
+- Broader DLNA metadata and codec compatibility handling
 - Signed/notarized installers
 - Per-Viewer bitrate and quality controls
 - More detailed ICE candidate diagnostics
