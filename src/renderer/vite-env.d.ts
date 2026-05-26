@@ -146,9 +146,10 @@ declare global {
   };
   type ScreenStreamOptions = {
     strategy: "auto" | "webm" | "hls";
-    resolution: "720p" | "1080p";
-    fps: 15 | 30;
-    bitrateMbps: 2 | 4 | 6;
+    preset: "balanced" | "low-latency" | "low-cpu";
+    resolution: "540p" | "720p" | "1080p";
+    fps: 10 | 15 | 30;
+    bitrateMbps: 1 | 2 | 4 | 6;
   };
   type ScreenStreamSession = {
     ok: boolean;
@@ -196,6 +197,13 @@ declare global {
       segmentReady: boolean;
       segmentCount: number;
       lastError?: string;
+      ffmpegSpeed?: number;
+      slowEncodingWarning?: boolean;
+      estimatedLatencySeconds?: number;
+      firstPlaylistAt?: number;
+      firstSegmentAt?: number;
+      firstPlaylistRequestAt?: number;
+      firstSegmentRequestAt?: number;
       recentRequests: ScreenStreamRequestLog[];
     }>;
   };

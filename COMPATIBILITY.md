@@ -4,9 +4,9 @@ Use this file to record real TV test results. Do not include private Wi-Fi passw
 
 ## Template
 
-| Vendor | Model | Firmware | Detection | Protocols | Default Receiver | Chromecast LOAD | WebM Stream | HLS Stream | Latency | Quality | DLNA Play | AirPlay Flow | Miracast Flow | Failure Log | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Example | Example TV | 1.0.0 | mDNS + SSDP | Chromecast, DLNA | Unknown | Unknown | Unknown | Unknown | Unknown | 720p/15fps/4Mbps | Unknown | N/A | N/A | Paste timeline summary | Same Wi-Fi, no guest network |
+| Vendor | Model | Firmware | Detection | Protocols | Default Receiver | Chromecast LOAD | WebM Stream | HLS Stream | Preset | Latency | ffmpeg Speed | CPU/Heat | Quality | DLNA Play | AirPlay Flow | Miracast Flow | Failure Log | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Example | Example TV | 1.0.0 | mDNS + SSDP | Chromecast, DLNA | Unknown | Unknown | Unknown | Unknown | Low Latency | Unknown | Unknown | Warm/OK | 720p/15fps/2Mbps | Unknown | N/A | N/A | Paste timeline summary | Same Wi-Fi, no guest network |
 
 ## What To Record
 
@@ -18,7 +18,10 @@ Use this file to record real TV test results. Do not include private Wi-Fi passw
 - Chromecast media LOAD result
 - Chromecast WebM screen stream result
 - Chromecast HLS screen stream result
+- Selected preset: Low Latency, Balanced, or Low CPU
 - Approximate latency and selected quality
+- ffmpeg speed from stream diagnostics
+- CPU/heat notes such as cool, warm, hot, throttling suspected
 - DLNA SetAVTransportURI/Play result
 - AirPlay OS flow result
 - Miracast OS flow result

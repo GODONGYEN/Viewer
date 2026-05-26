@@ -133,7 +133,7 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 4. 타임라인에서 Cast V2 TLS 연결, `GET_STATUS`, Default Media Receiver `LAUNCH` 단계를 확인합니다.
 5. `테스트 미디어 재생`을 누르고 mp4, m4v, mov, mp3, jpg, png 중 하나를 선택합니다.
 6. 타임라인에서 media server 시작, Chromecast `LOAD`, media status 수신 여부를 확인합니다.
-7. `Chromecast 화면 스트림 옵션`에서 기본값 `Auto(HLS 우선) / 720p / 15fps / 2 Mbps`를 확인합니다.
+7. `Chromecast 화면 스트림 옵션`에서 기본값 `Low Latency / Auto(HLS 우선) / 720p / 15fps / 2 Mbps`를 확인합니다.
 8. `Chromecast 화면 스트림 시작` 또는 `화면 스트림 캐스팅 실험`을 누르고 OS 화면 선택 권한을 직접 허용합니다.
 9. HLS playlist와 첫 segment 준비 후 Chromecast에 `LOAD` 되는지 확인합니다.
 10. TV에서 5초 이상 화면이 표시되면 성공으로 기록합니다.
@@ -145,6 +145,17 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 16. WebM은 `init OK`와 queued chunks 증가가 표시되어야 합니다.
 17. 최근 HTTP 요청에 Chromecast의 `index.m3u8`, segment, 또는 `live.webm` 요청이 남는지 확인합니다.
 18. 타임라인에서 `MEDIA_STATUS initial`, `MEDIA_STATUS follow-up`, `MEDIA_STATUS timeout` 중 어떤 상태가 기록됐는지 확인합니다.
+
+### Chromecast 지연 시간과 CPU 테스트
+
+1. `Low Latency` preset으로 시작합니다.
+2. 노트북 화면에서 초 단위 시계나 타이머를 띄우고 TV 화면과 비교합니다.
+3. `스트림 URL 진단`에서 estimated latency, ffmpeg speed, HLS segment count를 확인합니다.
+4. 성공 기준은 TV에 화면이 5초 이상 안정적으로 표시되고, Low Latency에서 체감 지연이 2~5초 범위에 들어오는 것입니다.
+5. ffmpeg speed가 `0.9x` 아래로 5초 이상 내려가거나 MacBook 발열이 심하면 `Low CPU로 재시작`을 누릅니다.
+6. Low CPU에서는 540p / 10fps / 1 Mbps로 동작하므로 화질은 낮지만 발열과 인코딩 부하가 줄어야 합니다.
+7. Activity Monitor에서 Electron/ffmpeg CPU 사용률을 함께 확인합니다.
+8. TV가 짧은 HLS playlist를 불안정하게 처리하면 `Balanced` preset으로 다시 테스트합니다.
 
 ### Electron 화면 캡처 fallback 테스트
 

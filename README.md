@@ -165,7 +165,15 @@ The screen stream flow is:
 6. The main process serves either a WebM chunked stream or an HLS playlist through the LAN HTTP stream server.
 7. Chromecast receives a `LOAD` request with `streamType: LIVE`.
 
-Default options are `720p`, `15fps`, `2 Mbps`, and `Auto(HLS first)`. Auto starts HLS and WebM sessions from the same user-approved capture, waits for the HLS playlist and first segment before sending Chromecast `LOAD`, and falls back to WebM if the HLS strategy fails. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility, with a few seconds of latency.
+Default options are `Low Latency`, `720p`, `15fps`, `2 Mbps`, and `Auto(HLS first)`. Auto starts HLS and WebM sessions from the same user-approved capture, waits for the HLS playlist and first segment before sending Chromecast `LOAD`, and falls back to WebM if the HLS strategy fails. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility, with a few seconds of latency.
+
+Available stream presets:
+
+- `Low Latency`: 720p / 15fps / 2 Mbps, 1-second HLS segments, playlist size 2, `ultrafast` x264.
+- `Balanced`: 720p / 15fps / 2 Mbps, 1-second HLS segments, playlist size 3, `superfast` x264.
+- `Low CPU`: 540p / 10fps / 1 Mbps, 1-second HLS segments, playlist size 3, `ultrafast` x264.
+
+Latency cannot be zero because the pipeline still has capture, encoding, HLS segmenting, LAN transfer, and Chromecast buffering. Use `Low Latency` first; if the Mac gets hot or diagnostics show ffmpeg speed below `0.9x`, switch to `Low CPU`.
 
 The TV detail panel includes a stream diagnostics view. It shows the generated HLS/WebM URLs, whether HLS playlist and first segment are ready, whether WebM init chunks exist, recent HTTP requests from Chromecast, and Chromecast `MEDIA_STATUS` values such as `BUFFERING`, `PLAYING`, `IDLE`, and `ERROR`.
 

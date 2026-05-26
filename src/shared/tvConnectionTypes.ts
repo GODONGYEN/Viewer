@@ -1,4 +1,5 @@
 import { TVDevice, TVProtocol } from "./tvTypes";
+import { ScreenStreamBitrateMbps, ScreenStreamFps, ScreenStreamPreset, ScreenStreamResolution } from "./screenStreamTuning";
 
 export type TVConnectorKind = "chromecast" | "airplay" | "dlna" | "miracast" | "diagnostic";
 
@@ -50,9 +51,10 @@ export type TVConnectionOptions = {
 
 export type ScreenStreamOptions = {
   strategy: "auto" | "webm" | "hls";
-  resolution: "720p" | "1080p";
-  fps: 15 | 30;
-  bitrateMbps: 2 | 4 | 6;
+  preset: ScreenStreamPreset;
+  resolution: ScreenStreamResolution;
+  fps: ScreenStreamFps;
+  bitrateMbps: ScreenStreamBitrateMbps;
 };
 
 export type ScreenStreamSession = {

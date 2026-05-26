@@ -167,12 +167,12 @@ export function setupTvConnectionIpc(window: BrowserWindow) {
   ipcMain.handle("tv-connection:select-dlna-media", () => selectDlnaMediaFile());
   ipcMain.handle(
     "tv-connection:screen-stream-start",
-    async (_event, payload: { targetIp?: string; deviceId?: string; contentType?: string; strategy?: "webm" | "hls"; options?: { strategy: "auto" | "webm" | "hls"; resolution: "720p" | "1080p"; fps: 15 | 30; bitrateMbps: 2 | 4 | 6 } }) => {
+    async (_event, payload: { targetIp?: string; deviceId?: string; contentType?: string; strategy?: "webm" | "hls"; options?: { strategy: "auto" | "webm" | "hls"; preset: "balanced" | "low-latency" | "low-cpu"; resolution: "540p" | "720p" | "1080p"; fps: 10 | 15 | 30; bitrateMbps: 1 | 2 | 4 | 6 } }) => {
     if (!payload?.contentType?.startsWith("video/webm")) {
       return { ok: false, message: "현재 화면 스트림 실험은 video/webm MediaRecorder 출력만 지원합니다." };
     }
       const strategy = payload.strategy ?? "webm";
-      const options = payload.options ?? { strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 4 };
+      const options = payload.options ?? { strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2 };
       const session = strategy === "hls" ? await startHlsScreenStream(payload.targetIp, options) : await startScreenStream(payload.targetIp, payload.contentType);
       sendEvent({
         connectionId: session.id,

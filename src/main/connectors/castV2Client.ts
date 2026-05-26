@@ -154,7 +154,8 @@ export function createMediaLoadPayload(requestId: number, sessionId: string, med
         type: 0,
         title: "LAN Screen Viewer Cast"
       }
-    }
+    },
+    customData: streamType === "LIVE" ? { live: true, lowLatencyHint: true } : undefined
   };
 }
 

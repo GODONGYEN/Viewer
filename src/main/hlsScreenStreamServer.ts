@@ -8,6 +8,7 @@ import { URL } from "node:url";
 import ffmpegPath from "ffmpeg-static";
 import { getBestLocalIp } from "./mediaServer";
 import { ScreenStreamOptions } from "../shared/tvConnectionTypes";
+import { getScreenStreamTuning, parseFfmpegSpeed, shouldWarnForSlowEncoding } from "../shared/screenStreamTuning";
 
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
 
@@ -17,6 +18,12 @@ type HlsSession = {
   process: ChildProcessWithoutNullStreams;
   startedAt: number;
   lastError?: string;
+  latestSpeed?: number;
+  slowSince?: number;
+  firstPlaylistAt?: number;
+  firstSegmentAt?: number;
+  firstPlaylistRequestAt?: number;
+  firstSegmentRequestAt?: number;
   requestLog: StreamHttpRequestLog[];
 };
 
@@ -91,6 +98,11 @@ async function ensureHlsServer() {
     }
 
     const contentType = requestedFile.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : requestedFile.endsWith(".m4s") ? "video/iso.segment" : "video/mp2t";
+    if (requestedFile.endsWith(".m3u8")) {
+      session.firstPlaylistRequestAt ??= Date.now();
+    } else if (requestedFile.endsWith(".ts") || requestedFile.endsWith(".m4s")) {
+      session.firstSegmentRequestAt ??= Date.now();
+    }
     pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 200, file: requestedFile, userAgent: request.headers["user-agent"]?.slice(0, 120), message: requestedFile.endsWith(".m3u8") ? "playlist requested" : "segment requested" });
     emitHlsEvent(session.id, requestedFile.endsWith(".m3u8") ? "chromecast-requested-playlist" : "chromecast-requested-segment", "Chromecast 또는 클라이언트가 HLS 파일을 요청했습니다.", {
       method: request.method ?? "GET",
@@ -134,54 +146,27 @@ export async function startHlsScreenStream(targetIp: string | undefined, options
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), `viewer-hls-${id}-`));
   const playlistPath = path.join(directory, "index.m3u8");
   const segmentPattern = path.join(directory, "segment-%05d.ts");
-  const scale = options.resolution === "1080p" ? "scale=-2:1080" : "scale=-2:720";
-  const fps = String(options.fps);
-  const bitrate = `${options.bitrateMbps}M`;
-
-  const child = spawn(ffmpegPath, [
-    "-hide_banner",
-    "-loglevel",
-    "warning",
-    "-fflags",
-    "+genpts",
-    "-i",
-    "pipe:0",
-    "-an",
-    "-vf",
-    `${scale},fps=${fps}`,
-    "-c:v",
-    "libx264",
-    "-preset",
-    "veryfast",
-    "-tune",
-    "zerolatency",
-    "-profile:v",
-    "baseline",
-    "-pix_fmt",
-    "yuv420p",
-    "-b:v",
-    bitrate,
-    "-maxrate",
-    bitrate,
-    "-bufsize",
-    `${options.bitrateMbps * 2}M`,
-    "-f",
-    "hls",
-    "-hls_time",
-    "2",
-    "-hls_list_size",
-    "5",
-    "-hls_flags",
-    "delete_segments+append_list+omit_endlist+independent_segments",
-    "-hls_segment_filename",
-    segmentPattern,
-    playlistPath
-  ]);
+  const tuning = getScreenStreamTuning(options);
+  const child = spawn(ffmpegPath, buildHlsFfmpegArgs(options, playlistPath, segmentPattern));
 
   const session: HlsSession = { id, directory, process: child, startedAt: Date.now(), requestLog: [] };
   sessions.set(id, session);
   child.stderr.on("data", (chunk) => {
-    session.lastError = chunk.toString("utf8").trim().slice(0, 500);
+    const output = chunk.toString("utf8").trim();
+    session.lastError = output.slice(0, 500);
+    for (const line of output.split(/\r?\n/)) {
+      const speed = parseFfmpegSpeed(line);
+      if (speed === null) continue;
+      session.latestSpeed = speed;
+      if (speed < 0.9) {
+        session.slowSince ??= Date.now();
+        if (shouldWarnForSlowEncoding(speed, (Date.now() - session.slowSince) / 1000)) {
+          emitHlsEvent(id, "hls-encoding-slow", "ffmpeg 인코딩 속도가 실시간보다 느립니다. Low CPU 모드를 권장합니다.", { speed });
+        }
+      } else {
+        session.slowSince = undefined;
+      }
+    }
   });
   child.once("exit", () => {
     emitHlsEvent(id, "hls-ffmpeg-exit", "ffmpeg HLS process가 종료되었습니다.", { lastError: session.lastError });
@@ -192,8 +177,70 @@ export async function startHlsScreenStream(targetIp: string | undefined, options
     id,
     strategy: "hls" as const,
     contentType: "application/vnd.apple.mpegurl",
-    url: `http://${getBestLocalIp(targetIp)}:${port}/hls/${id}/index.m3u8`
+    url: `http://${getBestLocalIp(targetIp)}:${port}/hls/${id}/index.m3u8`,
+    tuning
   };
+}
+
+export function buildHlsFfmpegArgs(options: ScreenStreamOptions, playlistPath: string, segmentPattern: string) {
+  const tuning = getScreenStreamTuning(options);
+  const scale = `scale=-2:${tuning.targetHeight}`;
+  const fps = String(tuning.fps);
+  const bitrate = `${tuning.bitrateMbps}M`;
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-nostats",
+    "-progress",
+    "pipe:2",
+    "-fflags",
+    "+genpts",
+    "-i",
+    "pipe:0",
+    "-an",
+    "-vf",
+    `${scale},fps=${fps}`,
+    "-c:v",
+    "libx264",
+    "-preset",
+    tuning.ffmpegPreset,
+    "-tune",
+    "zerolatency",
+    "-profile:v",
+    "baseline",
+    "-level",
+    "3.1",
+    "-pix_fmt",
+    "yuv420p",
+    "-r",
+    fps,
+    "-g",
+    String(tuning.gop),
+    "-keyint_min",
+    String(tuning.keyintMin),
+    "-sc_threshold",
+    "0",
+    "-b:v",
+    bitrate,
+    "-maxrate",
+    bitrate,
+    "-bufsize",
+    `${Math.max(1, tuning.bitrateMbps)}M`,
+    "-f",
+    "hls",
+    "-hls_time",
+    String(tuning.hlsTimeSeconds),
+    "-hls_list_size",
+    String(tuning.hlsListSize),
+    "-hls_flags",
+    "delete_segments+append_list+omit_endlist+independent_segments+split_by_time",
+    "-start_number",
+    "0",
+    "-hls_segment_filename",
+    segmentPattern,
+    playlistPath
+  ];
 }
 
 export function hasHlsScreenStream(streamId: string) {
@@ -218,12 +265,24 @@ export function getHlsReadyState(streamId: string) {
   const session = sessions.get(streamId);
   if (!session) return { exists: false, playlistReady: false, segmentReady: false };
   const files = fs.existsSync(session.directory) ? fs.readdirSync(session.directory) : [];
+  const firstPlaylist = files.includes("index.m3u8") ? fs.statSync(path.join(session.directory, "index.m3u8")).mtimeMs : undefined;
+  const segmentFiles = files.filter((file) => file.endsWith(".ts") || file.endsWith(".m4s"));
+  const firstSegment = segmentFiles.length ? Math.min(...segmentFiles.map((file) => fs.statSync(path.join(session.directory, file)).mtimeMs)) : undefined;
+  if (firstPlaylist) session.firstPlaylistAt ??= firstPlaylist;
+  if (firstSegment) session.firstSegmentAt ??= firstSegment;
   return {
     exists: true,
     playlistReady: files.includes("index.m3u8"),
-    segmentReady: files.some((file) => file.endsWith(".ts") || file.endsWith(".m4s")),
-    segmentCount: files.filter((file) => file.endsWith(".ts") || file.endsWith(".m4s")).length,
-    lastError: session.lastError
+    segmentReady: segmentFiles.length > 0,
+    segmentCount: segmentFiles.length,
+    lastError: session.lastError,
+    ffmpegSpeed: session.latestSpeed,
+    slowEncodingWarning: shouldWarnForSlowEncoding(session.latestSpeed, session.slowSince ? (Date.now() - session.slowSince) / 1000 : 0),
+    firstPlaylistAt: session.firstPlaylistAt,
+    firstSegmentAt: session.firstSegmentAt,
+    firstPlaylistRequestAt: session.firstPlaylistRequestAt,
+    firstSegmentRequestAt: session.firstSegmentRequestAt,
+    estimatedLatencySeconds: session.firstSegmentRequestAt && session.startedAt ? Math.round(((session.firstSegmentRequestAt - session.startedAt) / 1000) * 10) / 10 : undefined
   };
 }
 
@@ -241,6 +300,13 @@ export function getHlsScreenStreamDiagnostics(streamIds?: string[]) {
       segmentReady: readyState.segmentReady,
       segmentCount: readyState.segmentCount ?? 0,
       lastError: readyState.lastError,
+      ffmpegSpeed: readyState.ffmpegSpeed,
+      slowEncodingWarning: readyState.slowEncodingWarning,
+      estimatedLatencySeconds: readyState.estimatedLatencySeconds,
+      firstPlaylistAt: readyState.firstPlaylistAt,
+      firstSegmentAt: readyState.firstSegmentAt,
+      firstPlaylistRequestAt: readyState.firstPlaylistRequestAt,
+      firstSegmentRequestAt: readyState.firstSegmentRequestAt,
       recentRequests: session?.requestLog ?? orphanRequestLog.filter((entry) => entry.path.includes(id)).slice(0, 20)
     };
   });

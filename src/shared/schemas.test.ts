@@ -15,8 +15,9 @@ import { buildDidlLiteMetadata, buildSoapEnvelope, extractDlnaAvTransportService
 import { createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
 import { getBestLocalIp, getContentTypeForPath, getMediaTypeForPath } from "../main/mediaServer";
 import { chooseScreenStreamMimeType, getScreenStreamDiagnostics, getScreenStreamLimits } from "../main/screenStreamServer";
-import { getHlsReadyState, getHlsScreenStreamDiagnostics } from "../main/hlsScreenStreamServer";
+import { buildHlsFfmpegArgs, getHlsReadyState, getHlsScreenStreamDiagnostics } from "../main/hlsScreenStreamServer";
 import { chooseBestRecorderMimeType, getScreenCaptureSupport, isValidCaptureSource, normalizeCaptureError } from "../renderer/screenCapture";
+import { getRecorderTimesliceMs, getScreenStreamTuning, parseFfmpegSpeed, shouldWarnForSlowEncoding } from "./screenStreamTuning";
 
 describe("network helpers", () => {
   it("recognizes private IPv4 ranges", () => {
@@ -268,7 +269,7 @@ describe("schema validation", () => {
           contentType: "video/webm",
           streamType: "LIVE",
           screenStreamStrategy: "auto",
-          screenStreamOptions: { strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 2 },
+          screenStreamOptions: { strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2 },
           screenStreamSources: [
             { id: "hls-1", url: "http://192.168.1.2:3000/hls/hls-1/index.m3u8", contentType: "application/vnd.apple.mpegurl", strategy: "hls" },
             { id: "webm-1", url: "http://192.168.1.2:3000/screen-stream/webm-1/live.webm", contentType: "video/webm", strategy: "webm" }
@@ -281,10 +282,49 @@ describe("schema validation", () => {
         device,
         options: {
           action: "start-screen-cast-experiment",
-          screenStreamOptions: { strategy: "auto", resolution: "4k", fps: 60, bitrateMbps: 40 }
+          screenStreamOptions: { strategy: "auto", preset: "fastest", resolution: "4k", fps: 60, bitrateMbps: 40 }
         }
       }).success
     ).toBe(false);
+  });
+
+  it("builds screen stream tuning profiles for latency and CPU tradeoffs", () => {
+    expect(getScreenStreamTuning({ preset: "low-latency" })).toMatchObject({
+      resolution: "720p",
+      fps: 15,
+      bitrateMbps: 2,
+      hlsTimeSeconds: 1,
+      hlsListSize: 2,
+      ffmpegPreset: "ultrafast"
+    });
+    expect(getScreenStreamTuning({ preset: "low-cpu" })).toMatchObject({
+      resolution: "540p",
+      fps: 10,
+      bitrateMbps: 1,
+      targetHeight: 540
+    });
+    expect(getRecorderTimesliceMs({ preset: "balanced" })).toBe(500);
+  });
+
+  it("builds low latency and low CPU ffmpeg HLS args", () => {
+    const lowLatencyArgs = buildHlsFfmpegArgs({ strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2 }, "/tmp/index.m3u8", "/tmp/segment-%05d.ts");
+    expect(lowLatencyArgs).toContain("ultrafast");
+    expect(lowLatencyArgs.slice(lowLatencyArgs.indexOf("-hls_time") + 1, lowLatencyArgs.indexOf("-hls_time") + 2)).toEqual(["1"]);
+    expect(lowLatencyArgs.slice(lowLatencyArgs.indexOf("-hls_list_size") + 1, lowLatencyArgs.indexOf("-hls_list_size") + 2)).toEqual(["2"]);
+    expect(lowLatencyArgs.slice(lowLatencyArgs.indexOf("-g") + 1, lowLatencyArgs.indexOf("-g") + 2)).toEqual(["15"]);
+
+    const lowCpuArgs = buildHlsFfmpegArgs({ strategy: "auto", preset: "low-cpu", resolution: "540p", fps: 10, bitrateMbps: 1 }, "/tmp/index.m3u8", "/tmp/segment-%05d.ts");
+    expect(lowCpuArgs).toContain("scale=-2:540,fps=10");
+    expect(lowCpuArgs.slice(lowCpuArgs.indexOf("-b:v") + 1, lowCpuArgs.indexOf("-b:v") + 2)).toEqual(["1M"]);
+  });
+
+  it("parses ffmpeg speed and reports slow encoding warnings", () => {
+    expect(parseFfmpegSpeed("frame=12 speed=0.82x")).toBe(0.82);
+    expect(parseFfmpegSpeed("speed=1.24x")).toBe(1.24);
+    expect(parseFfmpegSpeed("no speed")).toBeNull();
+    expect(shouldWarnForSlowEncoding(0.75, 6)).toBe(true);
+    expect(shouldWarnForSlowEncoding(0.75, 2)).toBe(false);
+    expect(shouldWarnForSlowEncoding(1.05, 10)).toBe(false);
   });
 
   it("reports missing HLS sessions as not ready", () => {
