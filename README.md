@@ -21,16 +21,16 @@ LAN Screen Viewer is an Electron + React + TypeScript app for local screen shari
 
 ## Security Principles
 
-- No hidden capture
-- No remote control
-- No keyboard or mouse event forwarding
-- No OS permission bypass
-- No firewall or authentication bypass
+This app is designed for voluntary local screen sharing only. It does not support unauthorized access, hidden capture, remote control, keyboard/mouse forwarding, or bypassing operating-system security prompts.
+
+- Host must click `화면 공유 시작` before any screen stream exists
+- Host must approve each Viewer before WebRTC signaling proceeds
+- Viewer receives video only; it cannot control the Host
 - No automatic Viewer connection
-- No WebRTC signal relay before Host approval
 - No PIN in UDP discovery broadcasts
 - QR codes omit PIN by default
 - PIN-including QR data requires explicit Host opt-in
+- No firewall, authentication, or OS permission bypass
 - Renderer uses `contextIsolation: true` and `nodeIntegration: false`
 
 ## Tech Stack
@@ -50,7 +50,8 @@ LAN Screen Viewer is an Electron + React + TypeScript app for local screen shari
 ## Install
 
 ```bash
-cd /Users/godonghyeon/Documents/Viewer
+git clone https://github.com/GODONGYEN/Viewer.git
+cd Viewer
 npm install
 ```
 
@@ -138,7 +139,7 @@ Host may explicitly enable `PIN 포함 QR 생성`, but this is more sensitive an
 If discovery and QR fallback are unavailable:
 
 1. Viewer opens `수동 연결`.
-2. Viewer enters the Host LAN address, for example `http://192.168.0.12:4173`.
+2. Viewer enters the Host LAN HTTP address, for example `http://192.168.0.12:4173`.
 3. Viewer enters the 6-digit PIN.
 4. Host approves the request.
 
@@ -202,11 +203,11 @@ npm audit
 
 ## Intentionally Not Implemented
 
-- Unauthorized access
-- Hidden screen capture
+- Unauthorized access to another device
+- Hidden or background screen capture
 - Remote control
 - Keyboard/mouse forwarding
-- LAN-outside automatic access
+- Automatic connection outside the local network
 - Security policy bypass
 - Firewall bypass
 - OS permission bypass
@@ -216,7 +217,7 @@ npm audit
 - Camera-based QR scanning
 - mDNS/Bonjour discovery
 - Stronger multi-window automated Electron tests
-- TURN/STUN options for controlled non-LAN deployments
+- Optional ICE diagnostics and relay configuration for explicitly managed, consent-based deployments
 - Signed/notarized installers
 - Per-Viewer bitrate and quality controls
 - More detailed ICE candidate diagnostics
