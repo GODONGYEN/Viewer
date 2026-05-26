@@ -16,6 +16,7 @@ import { createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage,
 import { getBestLocalIp, getContentTypeForPath, getMediaTypeForPath } from "../main/mediaServer";
 import { chooseScreenStreamMimeType, getScreenStreamLimits } from "../main/screenStreamServer";
 import { getHlsReadyState } from "../main/hlsScreenStreamServer";
+import { chooseBestRecorderMimeType, getScreenCaptureSupport, isValidCaptureSource, normalizeCaptureError } from "../renderer/screenCapture";
 
 describe("network helpers", () => {
   it("recognizes private IPv4 ranges", () => {
@@ -288,5 +289,49 @@ describe("schema validation", () => {
 
   it("reports missing HLS sessions as not ready", () => {
     expect(getHlsReadyState("missing-session")).toMatchObject({ exists: false, playlistReady: false, segmentReady: false });
+  });
+
+  it("checks screen capture support without assuming browser APIs", () => {
+    expect(
+      getScreenCaptureSupport({
+        navigator: { mediaDevices: { getDisplayMedia: async () => undefined as unknown as MediaStream, getUserMedia: async () => undefined as unknown as MediaStream } as MediaDevices },
+        MediaRecorder: class {} as typeof MediaRecorder,
+        isSecureContext: true
+      })
+    ).toMatchObject({ hasMediaDevices: true, hasGetDisplayMedia: true, hasGetUserMedia: true, hasMediaRecorder: true, isSecureContext: true });
+    expect(getScreenCaptureSupport({ navigator: undefined, MediaRecorder: undefined, isSecureContext: false })).toMatchObject({
+      hasMediaDevices: false,
+      hasGetDisplayMedia: false,
+      hasGetUserMedia: false,
+      hasMediaRecorder: false,
+      isSecureContext: false
+    });
+  });
+
+  it("normalizes capture errors into fallback decisions", () => {
+    expect(normalizeCaptureError(new Error("Not supported"))).toMatchObject({
+      reason: "not-supported",
+      shouldTryElectronFallback: true
+    });
+    expect(normalizeCaptureError(new DOMException("denied", "NotAllowedError"))).toMatchObject({
+      reason: "permission-denied",
+      shouldTryElectronFallback: true
+    });
+    expect(normalizeCaptureError(new TypeError("bad constraints"))).toMatchObject({
+      reason: "constraints",
+      shouldTryElectronFallback: true
+    });
+  });
+
+  it("selects recorder MIME types without requiring audio", () => {
+    expect(chooseBestRecorderMimeType((mimeType) => mimeType === "video/webm;codecs=vp8")).toBe("video/webm;codecs=vp8");
+    expect(chooseBestRecorderMimeType((mimeType) => mimeType === "video/webm")).toBe("video/webm");
+    expect(chooseBestRecorderMimeType(() => false)).toBe("");
+  });
+
+  it("validates Electron desktop capture sources", () => {
+    expect(isValidCaptureSource({ id: "screen:1:0", name: "Entire Screen", thumbnailDataUrl: "data:image/png;base64,abc" })).toBe(true);
+    expect(isValidCaptureSource({ id: "", name: "Broken" })).toBe(false);
+    expect(isValidCaptureSource({ id: "screen:1:0" })).toBe(false);
   });
 });

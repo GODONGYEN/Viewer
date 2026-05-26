@@ -4,6 +4,14 @@ import { HostFoundPayloadSchema, JoinPayload, JoinPayloadSchema, PIN_TTL_MS, SIG
 import { getDeviceMergeKey, getTvActions, getTvConnectionGuide, mergeTvDevices } from "../shared/tvActions";
 import type { TVAction, TVDevice, TVDiscoveryStatus } from "../shared/tvTypes";
 import type { ScreenStreamOptions, ScreenStreamSource, TVConnectionAction, TVConnectionEvent, TVConnectionStatus } from "../shared/tvConnectionTypes";
+import {
+  chooseBestRecorderMimeType,
+  normalizeCaptureError,
+  startDesktopSourceCapture,
+  startDisplayMediaCapture,
+  stopScreenCapture
+} from "./screenCapture";
+import type { ScreenCaptureMethod, ScreenCaptureSource } from "./screenCapture";
 
 type Mode = "home" | "host" | "viewer" | "tv";
 
@@ -171,6 +179,10 @@ export default function App() {
   const [screenStreamOptions, setScreenStreamOptions] = useState<ScreenStreamOptions>({ strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 2 });
   const [screenPreviewActive, setScreenPreviewActive] = useState(false);
   const [lastScreenStreamSources, setLastScreenStreamSources] = useState<ScreenStreamSource[]>([]);
+  const [captureSources, setCaptureSources] = useState<ScreenCaptureSource[]>([]);
+  const [showCaptureSourcePicker, setShowCaptureSourcePicker] = useState(false);
+  const [captureStatusMessage, setCaptureStatusMessage] = useState("");
+  const [captureEnvironmentInfo, setCaptureEnvironmentInfo] = useState<ScreenCaptureEnvironmentInfo | null>(null);
 
   const hostIdRef = useRef(createHostId());
   const hostSocketRef = useRef<WebSocket | null>(null);
@@ -185,6 +197,7 @@ export default function App() {
   const tvScreenRecorderRef = useRef<MediaRecorder | null>(null);
   const tvScreenStreamRef = useRef<MediaStream | null>(null);
   const tvScreenStreamIdsRef = useRef<string[]>([]);
+  const captureSourceResolverRef = useRef<((source: ScreenCaptureSource | null) => void) | null>(null);
 
   function addLog(message: string) {
     setLogs((current) => [`${new Date().toLocaleTimeString()} ${message}`, ...current].slice(0, 80));
@@ -250,6 +263,12 @@ export default function App() {
     });
 
     return () => unsubscribe?.();
+  }, []);
+
+  useEffect(() => {
+    window.screenCapture?.getEnvironmentInfo().then(setCaptureEnvironmentInfo).catch(() => {
+      setCaptureEnvironmentInfo(null);
+    });
   }, []);
 
   useEffect(() => {
@@ -1054,51 +1073,104 @@ export default function App() {
     setTvActionMessage("TV 직접 연결 시도를 시작했습니다. 아래 타임라인에서 진행 상태를 확인하세요.");
   }
 
-  function chooseRecorderMimeType() {
-    const candidates = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"];
-    return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+  function resolveCaptureSource(source: ScreenCaptureSource | null) {
+    captureSourceResolverRef.current?.(source);
+    captureSourceResolverRef.current = null;
+    setShowCaptureSourcePicker(false);
   }
 
-  async function startChromecastScreenStream(device: TVDevice, options: ScreenStreamOptions): Promise<{ sources: ScreenStreamSource[] } | null> {
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      setTvActionMessage("이 환경에서는 화면 캡처 API를 사용할 수 없습니다.");
-      return null;
+  async function chooseCaptureSource(sources: ScreenCaptureSource[]) {
+    setCaptureSources(sources);
+    setShowCaptureSourcePicker(true);
+    return new Promise<ScreenCaptureSource | null>((resolve) => {
+      captureSourceResolverRef.current = resolve;
+    });
+  }
+
+  async function obtainScreenCaptureStream(): Promise<{ stream: MediaStream; method: ScreenCaptureMethod; sourceName?: string } | null> {
+    setCaptureStatusMessage("기본 getDisplayMedia로 화면 캡처를 시작합니다.");
+    const displayMediaResult = await startDisplayMediaCapture();
+    if (displayMediaResult.ok) {
+      setCaptureStatusMessage("기본 getDisplayMedia 경로로 화면 캡처가 시작되었습니다.");
+      return displayMediaResult;
     }
 
-    const mimeType = chooseRecorderMimeType();
-    if (!mimeType) {
-      setTvActionMessage("MediaRecorder가 지원하는 WebM MIME type을 찾지 못했습니다.");
+    setCaptureStatusMessage(displayMediaResult.error.message);
+    if (!displayMediaResult.error.shouldTryElectronFallback || !window.screenCapture?.getSources) {
+      setTvActionMessage(`화면 캡처 시작 실패: ${displayMediaResult.error.message}`);
       return null;
     }
 
     try {
-      const height = options.resolution === "1080p" ? 1080 : 720;
-      const width = options.resolution === "1080p" ? 1920 : 1280;
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: options.fps, max: options.fps } },
-        audio: false
-      });
+      const sources = await window.screenCapture.getSources();
+      if (!sources.length) {
+        setTvActionMessage("Electron desktopCapturer가 선택 가능한 화면/창을 찾지 못했습니다.");
+        setCaptureStatusMessage("선택 가능한 화면/창이 없습니다. macOS 화면 기록 권한 또는 Electron 권한을 확인하세요.");
+        return null;
+      }
+
+      setCaptureStatusMessage("기본 화면 캡처가 지원되지 않아 Electron 화면 선택 방식으로 전환합니다.");
+      const selectedSource = await chooseCaptureSource(sources);
+      if (!selectedSource) {
+        setCaptureStatusMessage("화면/창 선택이 취소되었습니다.");
+        setTvActionMessage("화면 스트림 캐스팅을 취소했습니다.");
+        return null;
+      }
+
+      const fallbackResult = await startDesktopSourceCapture(selectedSource);
+      if (fallbackResult.ok) {
+        setCaptureStatusMessage(`${selectedSource.name} 소스를 Electron desktopCapturer fallback으로 캡처합니다.`);
+        return fallbackResult;
+      }
+
+      setCaptureStatusMessage(fallbackResult.error.message);
+      setTvActionMessage(`화면 캡처 시작 실패: ${fallbackResult.error.message}`);
+      return null;
+    } catch (error) {
+      const normalized = normalizeCaptureError(error);
+      setCaptureStatusMessage(normalized.message);
+      setTvActionMessage(`화면 캡처 시작 실패: ${normalized.message}`);
+      return null;
+    }
+  }
+
+  async function startChromecastScreenStream(device: TVDevice, options: ScreenStreamOptions): Promise<{ sources: ScreenStreamSource[] } | null> {
+    try {
+      if (typeof MediaRecorder === "undefined") {
+        setTvActionMessage("MediaRecorder가 이 Electron renderer에서 지원되지 않습니다.");
+        return null;
+      }
+      const mimeType = chooseBestRecorderMimeType();
+
+      const capture = await obtainScreenCaptureStream();
+      if (!capture) return null;
+
+      const { stream, method, sourceName } = capture;
       const strategies: Array<"hls" | "webm"> = options.strategy === "hls" ? ["hls"] : options.strategy === "webm" ? ["webm"] : ["hls", "webm"];
       const sources: ScreenStreamSource[] = [];
 
       for (const strategy of strategies) {
-        const session = await window.tvConnection?.startScreenStream({ targetIp: device.ipAddress, deviceId: device.id, contentType: mimeType, strategy, options });
+        const session = await window.tvConnection?.startScreenStream({ targetIp: device.ipAddress, deviceId: device.id, contentType: mimeType || "video/webm", strategy, options });
         if (session?.ok && session.id && session.url && session.contentType && session.strategy) {
           sources.push({ id: session.id, url: session.url, contentType: session.contentType, strategy: session.strategy });
         } else if (options.strategy !== "auto") {
-          stream.getTracks().forEach((track) => track.stop());
+          stopScreenCapture(stream);
           setTvActionMessage(session?.message ?? "화면 스트림 서버를 시작하지 못했습니다.");
           return null;
         }
       }
 
       if (sources.length === 0) {
-        stream.getTracks().forEach((track) => track.stop());
+        stopScreenCapture(stream);
         setTvActionMessage("HLS/WebM 화면 스트림 세션을 시작하지 못했습니다.");
         return null;
       }
 
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: options.bitrateMbps * 1_000_000 });
+      const recorderOptions: MediaRecorderOptions = {
+        videoBitsPerSecond: options.bitrateMbps * 1_000_000
+      };
+      if (mimeType) recorderOptions.mimeType = mimeType;
+      const recorder = new MediaRecorder(stream, recorderOptions);
       tvScreenStreamRef.current = stream;
       tvScreenRecorderRef.current = recorder;
       tvScreenStreamIdsRef.current = sources.map((source) => source.id);
@@ -1124,12 +1196,27 @@ export default function App() {
         void stopChromecastScreenStream();
       });
       recorder.start(sources.some((source) => source.strategy === "hls") ? 750 : 1000);
+      const captureLabel = method === "electron-desktop-capturer" ? `Electron desktopCapturer${sourceName ? ` (${sourceName})` : ""}` : "getDisplayMedia";
+      setTvConnectionEvents((current) => [
+        {
+          connectionId: activeTvConnectionId || `capture-${Date.now()}`,
+          deviceId: device.id,
+          connector: "diagnostic",
+          status: "media-loading",
+          step: "screen-capture",
+          message: `화면 캡처 성공: ${captureLabel}`,
+          timestamp: Date.now()
+        },
+        ...current
+      ]);
       setTvActionMessage(
-        `화면 캡처가 시작되었습니다. ${sources.map((source) => source.strategy.toUpperCase()).join(" → ")} 전략으로 Chromecast LOAD를 시도합니다. Auto는 HLS를 먼저 사용합니다.`
+        `화면 캡처가 시작되었습니다. 캡처 경로: ${captureLabel}. ${sources.map((source) => source.strategy.toUpperCase()).join(" → ")} 전략으로 Chromecast LOAD를 시도합니다. Auto는 HLS를 먼저 사용합니다.`
       );
       return { sources };
     } catch (error) {
-      setTvActionMessage(error instanceof Error ? `화면 캡처 시작 실패: ${error.message}` : "화면 캡처 시작에 실패했습니다.");
+      const normalized = normalizeCaptureError(error);
+      setCaptureStatusMessage(normalized.message);
+      setTvActionMessage(`화면 캡처 시작 실패: ${normalized.message}`);
       return null;
     }
   }
@@ -1138,7 +1225,7 @@ export default function App() {
     if (tvScreenRecorderRef.current?.state !== "inactive") {
       tvScreenRecorderRef.current?.stop();
     }
-    tvScreenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    stopScreenCapture(tvScreenStreamRef.current);
     if (tvScreenPreviewRef.current) {
       tvScreenPreviewRef.current.srcObject = null;
     }
@@ -1771,6 +1858,14 @@ export default function App() {
                       </button>
                     </div>
                     <p className="muted">공유할 화면은 다음 단계에서 OS 선택 창으로 직접 고릅니다. Chromecast 안정성을 위해 Auto는 HLS를 먼저 시도합니다. 기본은 720p / 15fps / 2 Mbps입니다.</p>
+                    {captureStatusMessage && <p className="muted capture-status">{captureStatusMessage}</p>}
+                    {captureEnvironmentInfo?.platform === "darwin" && (
+                      <div className="button-row compact">
+                        <button className="ghost-button" onClick={() => void window.screenCapture?.openScreenRecordingSettings()}>
+                          macOS 화면 기록 권한 열기
+                        </button>
+                      </div>
+                    )}
                     {screenPreviewActive && (
                       <div className="screen-preview">
                         <video ref={tvScreenPreviewRef} autoPlay muted playsInline />
@@ -1870,6 +1965,41 @@ export default function App() {
             )}
           </div>
         </section>
+      )}
+
+      {showCaptureSourcePicker && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="화면 선택">
+          <div className="source-picker-panel">
+            <div className="panel-header">
+              <div>
+                <h2>화면 또는 창 선택</h2>
+                <p className="muted">기본 화면 캡처가 지원되지 않아 Electron 화면 선택 방식으로 전환합니다. 공유할 화면/창을 직접 선택하세요.</p>
+              </div>
+              <button className="ghost-button" onClick={() => resolveCaptureSource(null)}>
+                취소
+              </button>
+            </div>
+
+            <div className="source-grid">
+              {captureSources.map((source) => (
+                <button className="source-card" key={source.id} onClick={() => resolveCaptureSource(source)}>
+                  {source.thumbnailDataUrl ? <img alt="" src={source.thumbnailDataUrl} /> : <div className="source-thumbnail-placeholder" />}
+                  <strong>{source.name}</strong>
+                  <span>{source.displayId ? `display ${source.displayId}` : "window/screen"}</span>
+                  <small>이 화면 공유</small>
+                </button>
+              ))}
+            </div>
+
+            <div className="diagnosis-panel">
+              <strong>macOS 권한 확인</strong>
+              <p>소스 선택 후에도 실패하면 화면 기록 권한이 없거나 아직 적용되지 않았을 수 있습니다. 권한을 허용한 뒤 앱을 재시작해야 할 수 있습니다.</p>
+              <button className="ghost-button" onClick={() => void window.screenCapture?.openScreenRecordingSettings()}>
+                macOS 화면 기록 권한 열기
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <section className="log-panel">

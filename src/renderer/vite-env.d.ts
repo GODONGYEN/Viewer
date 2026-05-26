@@ -171,6 +171,18 @@ declare global {
     mediaType?: "video" | "audio" | "image";
     message?: string;
   };
+  type ScreenCaptureSourceInfo = {
+    id: string;
+    name: string;
+    thumbnailDataUrl?: string;
+    displayId?: string;
+  };
+  type ScreenCaptureEnvironmentInfo = {
+    platform: NodeJS.Platform;
+    isElectron: boolean;
+    electronVersion?: string;
+    chromeVersion?: string;
+  };
 
   interface Window {
     lanViewer?: {
@@ -215,6 +227,11 @@ declare global {
       stopScreenStream: (streamId: string) => Promise<{ ok: boolean; message?: string }>;
       stopAllConnections: () => Promise<{ ok: boolean }>;
       onConnectionEvent: (callback: (event: TVConnectionEvent) => void) => () => void;
+    };
+    screenCapture?: {
+      getSources: () => Promise<ScreenCaptureSourceInfo[]>;
+      openScreenRecordingSettings: () => Promise<{ ok: boolean; message?: string }>;
+      getEnvironmentInfo: () => Promise<ScreenCaptureEnvironmentInfo>;
     };
   }
 }

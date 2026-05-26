@@ -61,3 +61,9 @@ contextBridge.exposeInMainWorld("tvConnection", {
     return () => ipcRenderer.removeListener("tv-connection:event", listener);
   }
 });
+
+contextBridge.exposeInMainWorld("screenCapture", {
+  getSources: () => ipcRenderer.invoke("screen-capture:get-sources"),
+  openScreenRecordingSettings: () => ipcRenderer.invoke("screen-capture:open-screen-recording-settings"),
+  getEnvironmentInfo: () => ipcRenderer.invoke("screen-capture:get-environment-info")
+});

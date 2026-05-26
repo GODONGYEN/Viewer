@@ -602,6 +602,77 @@ code {
   object-fit: contain;
 }
 
+.capture-status {
+  border-left: 3px solid #2364aa;
+  padding-left: 10px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 27, 0.58);
+}
+
+.source-picker-panel {
+  width: min(980px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+  border: 1px solid #d4e0e5;
+  border-radius: 8px;
+  padding: 18px;
+  background: #ffffff;
+  box-shadow: 0 18px 52px rgba(15, 23, 27, 0.24);
+}
+
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.source-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 190px;
+  border: 1px solid #d4e0e5;
+  border-radius: 8px;
+  padding: 10px;
+  color: #172026;
+  background: #f9fbfb;
+  text-align: left;
+}
+
+.source-card:hover:not(:disabled) {
+  border-color: #2364aa;
+  color: #172026;
+  background: #eef6ff;
+}
+
+.source-card img,
+.source-thumbnail-placeholder {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid #c8d3da;
+  border-radius: 6px;
+  background: #172026;
+  object-fit: cover;
+}
+
+.source-card span,
+.source-card small {
+  color: #52616b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .experimental-action {
   border-style: dashed;
 }
