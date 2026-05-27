@@ -40,10 +40,12 @@ export const TVConnectionOptionsSchema = z.object({
   screenStreamOptions: z
     .object({
       strategy: z.enum(["auto", "webm", "hls"]),
-      preset: z.enum(["balanced", "low-latency", "low-cpu"]),
+      preset: z.enum(["experimental-ull-hls", "balanced", "low-latency", "low-cpu"]),
       resolution: z.enum(["540p", "720p", "1080p"]),
       fps: z.union([z.literal(10), z.literal(15), z.literal(30)]),
-      bitrateMbps: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(6)])
+      bitrateMbps: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(6)]),
+      hlsStartBufferSegments: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+      rewritePlaylist: z.boolean()
     })
     .optional(),
   screenStreamSources: z

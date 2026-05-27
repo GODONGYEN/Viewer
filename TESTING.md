@@ -157,6 +157,57 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 7. Activity Monitor에서 Electron/ffmpeg CPU 사용률을 함께 확인합니다.
 8. TV가 짧은 HLS playlist를 불안정하게 처리하면 `Balanced` preset으로 다시 테스트합니다.
 
+### HLS 16초 지연 줄이기 테스트
+
+이번 최적화는 WebRTC 우회가 아니라 Default Media Receiver HLS 경로 자체를 줄이는 테스트입니다.
+
+1. Chromecast TV를 선택합니다.
+2. Stream Mode를 `Stable HLS`로 둡니다.
+3. Preset을 `Low Latency`로 선택합니다.
+4. 방식은 `HLS fallback` 또는 `Auto(HLS 우선)`을 선택합니다.
+5. `HLS start buffer`를 `2 segments`로 둡니다.
+6. `Playlist rewrite`를 `Latest window ON`으로 둡니다.
+7. `HLS 시작`을 누르고 화면/창을 직접 선택합니다.
+8. TV에 화면이 나오면 `스트림 URL 진단`을 눌러 다음 값을 기록합니다.
+   - playlist window
+   - rewritten window
+   - generated latest segment
+   - requested latest segment
+   - segment lag
+   - 404 count
+   - ffmpeg speed
+9. segment lag가 1~3이고 로딩이 줄면 성공 후보입니다.
+10. 지연이 여전히 크면 start buffer를 `1 segment`로 바꿔 재시작합니다.
+11. 로딩이 잦거나 404 segment 요청이 증가하면 start buffer를 `2` 또는 `3 segments`로 되돌리고 `Balanced` preset을 테스트합니다.
+12. 더 낮은 지연을 시험하려면 `ULL-HLS 시작`을 누릅니다. ULL-HLS는 0.5초 segment를 쓰므로 TV에 따라 로딩이 늘 수 있습니다.
+13. ffmpeg speed가 `0.8x` 아래로 떨어지면 CPU가 인코딩을 따라가지 못하는 상태입니다. `Low CPU로 재시작`을 테스트합니다.
+
+성공 기준:
+
+- TV 화면이 5초 이상 안정적으로 표시됩니다.
+- 지연이 기존 16초보다 줄어듭니다.
+- Low Latency HLS에서 segment lag가 1~3 근처로 유지됩니다.
+- `stream-http-404`가 반복되지 않습니다.
+- `MEDIA_STATUS follow-up`이 `PLAYING`으로 기록됩니다.
+
+### HLS playlist rewrite ON/OFF 비교
+
+1. 같은 TV와 같은 화면으로 `Low Latency` preset을 사용합니다.
+2. `Playlist rewrite ON`으로 1분 테스트합니다.
+3. `최근 30초 진단 로그` 또는 실패 로그를 복사합니다.
+4. `Playlist rewrite OFF`로 다시 시작합니다.
+5. TV가 요청한 segment 번호와 최신 generated segment 번호를 비교합니다.
+6. ON에서 segment lag가 더 낮고 404가 없다면 ON을 권장 설정으로 기록합니다.
+7. ON에서 로딩이 심하면 TV가 너무 짧은 window를 싫어할 수 있으므로 `Balanced` 또는 start buffer 3을 테스트합니다.
+
+### 로딩이 자주 발생할 때 확인할 것
+
+- `stream-http-404`가 늘어나면 TV가 삭제된 segment를 요청하고 있을 수 있습니다.
+- `segment lag`가 8 이상이면 TV가 오래된 segment를 따라오고 있을 수 있습니다.
+- playlist 요청은 있는데 segment 요청이 없으면 content type, playlist rewrite 형식, cache header를 확인합니다.
+- ffmpeg speed가 `0.9x` 아래면 Low CPU preset을 테스트합니다.
+- `rewritten window`가 너무 좁아 보이면 playlist size가 3인 Balanced preset을 테스트합니다.
+
 ### Chromecast Low Latency WebRTC 테스트
 
 1. `receiver/` 폴더를 HTTPS 호스팅에 배포합니다. GitHub Pages, Vercel, Netlify 같은 정적 호스팅을 사용할 수 있습니다.

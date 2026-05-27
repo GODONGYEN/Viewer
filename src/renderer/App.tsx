@@ -181,11 +181,19 @@ export default function App() {
   const [showDlnaExperiment, setShowDlnaExperiment] = useState(false);
   const [tvConnectionEvents, setTvConnectionEvents] = useState<TVConnectionEvent[]>([]);
   const [activeTvConnectionId, setActiveTvConnectionId] = useState<string>("");
-  const [screenStreamMode, setScreenStreamMode] = useState<"auto" | "webrtc-low-latency" | "hls-stable">("auto");
+  const [screenStreamMode, setScreenStreamMode] = useState<"auto" | "webrtc-low-latency" | "hls-stable">("hls-stable");
   const [customReceiverAppId, setCustomReceiverAppId] = useState(() => getInitialCustomReceiverAppId());
   const [webRtcCastStatus, setWebRtcCastStatus] = useState("대기 중");
   const [webRtcRttMs, setWebRtcRttMs] = useState<number | null>(null);
-  const [screenStreamOptions, setScreenStreamOptions] = useState<ScreenStreamOptions>({ strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2 });
+  const [screenStreamOptions, setScreenStreamOptions] = useState<ScreenStreamOptions>({
+    strategy: "hls",
+    preset: "low-latency",
+    resolution: "720p",
+    fps: 15,
+    bitrateMbps: 2,
+    hlsStartBufferSegments: 2,
+    rewritePlaylist: true
+  });
   const [screenPreviewActive, setScreenPreviewActive] = useState(false);
   const [lastScreenStreamSources, setLastScreenStreamSources] = useState<ScreenStreamSource[]>([]);
   const [screenStreamDiagnostics, setScreenStreamDiagnostics] = useState<ScreenStreamDiagnostics | null>(null);
@@ -1112,7 +1120,9 @@ export default function App() {
       preset,
       resolution: tuning.resolution,
       fps: tuning.fps,
-      bitrateMbps: tuning.bitrateMbps
+      bitrateMbps: tuning.bitrateMbps,
+      hlsStartBufferSegments: tuning.hlsStartBufferSegments,
+      rewritePlaylist: tuning.rewritePlaylist
     }));
     setTvActionMessage(`${preset === "low-latency" ? "Low Latency" : preset === "low-cpu" ? "Low CPU" : "Balanced"} preset을 적용했습니다.`);
   }
@@ -1124,7 +1134,9 @@ export default function App() {
       preset,
       resolution: tuning.resolution,
       fps: tuning.fps,
-      bitrateMbps: tuning.bitrateMbps
+      bitrateMbps: tuning.bitrateMbps,
+      hlsStartBufferSegments: tuning.hlsStartBufferSegments,
+      rewritePlaylist: tuning.rewritePlaylist
     };
     setScreenStreamOptions(nextOptions);
     await stopActiveTvConnection();
@@ -2136,6 +2148,7 @@ export default function App() {
                       <label>
                         Preset
                         <select value={screenStreamOptions.preset} onChange={(event) => applyScreenStreamPreset(event.target.value as ScreenStreamOptions["preset"])}>
+                          <option value="experimental-ull-hls">Experimental ULL-HLS</option>
                           <option value="low-latency">Low Latency</option>
                           <option value="balanced">Balanced</option>
                           <option value="low-cpu">Low CPU</option>
@@ -2186,6 +2199,27 @@ export default function App() {
                           <option value={6}>6 Mbps</option>
                         </select>
                       </label>
+                      <label>
+                        HLS start buffer
+                        <select
+                          value={screenStreamOptions.hlsStartBufferSegments}
+                          onChange={(event) => setScreenStreamOptions((current) => ({ ...current, hlsStartBufferSegments: Number(event.target.value) as ScreenStreamOptions["hlsStartBufferSegments"] }))}
+                        >
+                          <option value={1}>1 segment</option>
+                          <option value={2}>2 segments</option>
+                          <option value={3}>3 segments</option>
+                        </select>
+                      </label>
+                      <label>
+                        Playlist rewrite
+                        <select
+                          value={screenStreamOptions.rewritePlaylist ? "on" : "off"}
+                          onChange={(event) => setScreenStreamOptions((current) => ({ ...current, rewritePlaylist: event.target.value === "on" }))}
+                        >
+                          <option value="on">Latest window ON</option>
+                          <option value="off">OFF</option>
+                        </select>
+                      </label>
                     </div>
                     <label>
                       Custom Receiver App ID
@@ -2196,7 +2230,9 @@ export default function App() {
                       />
                     </label>
                     <div className="button-row">
-                      <button onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "auto")}>Auto로 시작</button>
+                      <button onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "hls-stable")}>HLS 시작</button>
+                      <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", { ...screenStreamOptions, preset: "experimental-ull-hls", resolution: "720p", fps: 15, bitrateMbps: 1, hlsStartBufferSegments: 2, rewritePlaylist: true }, "hls-stable")}>ULL-HLS 시작</button>
+                      <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "auto")}>Auto(WebRTC fallback)로 시작</button>
                       <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "webrtc-low-latency")}>Low Latency로 시작</button>
                       <button className="ghost-button" onClick={() => void startTvConnection(selectedTv, "start-screen-cast-experiment", screenStreamOptions, "hls-stable")}>Stable HLS로 시작</button>
                       <button className="ghost-button" onClick={() => void testCustomReceiverLaunch(selectedTv)}>Receiver 연결 테스트</button>
@@ -2207,7 +2243,7 @@ export default function App() {
                       </button>
                     </div>
                     <p className="muted">
-                      공유할 화면은 다음 단계에서 OS 선택 창으로 직접 고릅니다. Auto는 WebRTC Custom Receiver를 먼저 시도하고 실패하면 Stable HLS로 전환합니다. HLS Default Receiver는 지연이 길지만 fallback으로 유지됩니다.
+                      공유할 화면은 다음 단계에서 OS 선택 창으로 직접 고릅니다. 이번 HLS 최적화 경로는 Default Media Receiver를 유지하면서 최신 playlist window, cache busting, start buffer 조절로 지연과 로딩을 줄입니다.
                     </p>
                     <div className="stream-diagnostics">
                       <strong>Low Latency WebRTC 상태</strong>
@@ -2266,6 +2302,12 @@ export default function App() {
                                 ffmpeg speed: {session.ffmpegSpeed ? `${session.ffmpegSpeed.toFixed(2)}x` : "측정 중"} / 예상 pipeline latency:{" "}
                                 {session.estimatedLatencySeconds ? `${session.estimatedLatencySeconds}s` : "측정 중"}
                                 {session.slowEncodingWarning ? " / 실시간 인코딩보다 느림: Low CPU 권장" : ""}
+                              </p>
+                            )}
+                            {"segmentLag" in session && (
+                              <p>
+                                segment window: {session.rewrittenWindow ?? session.playlistWindow ?? "측정 중"} / generated {session.latestGeneratedSegment ?? "-"} / requested{" "}
+                                {session.latestRequestedSegment ?? "-"} / lag {session.segmentLag ?? "-"} / 404 {session.segment404Count ?? 0}
                               </p>
                             )}
                             {session.recentRequests.length === 0 ? (

@@ -149,10 +149,12 @@ declare global {
   };
   type ScreenStreamOptions = {
     strategy: "auto" | "webm" | "hls";
-    preset: "balanced" | "low-latency" | "low-cpu";
+    preset: "experimental-ull-hls" | "balanced" | "low-latency" | "low-cpu";
     resolution: "540p" | "720p" | "1080p";
     fps: 10 | 15 | 30;
     bitrateMbps: 1 | 2 | 4 | 6;
+    hlsStartBufferSegments: 1 | 2 | 3;
+    rewritePlaylist: boolean;
   };
   type ScreenStreamSession = {
     ok: boolean;
@@ -207,6 +209,12 @@ declare global {
       firstSegmentAt?: number;
       firstPlaylistRequestAt?: number;
       firstSegmentRequestAt?: number;
+      latestGeneratedSegment?: number;
+      latestRequestedSegment?: number;
+      segmentLag?: number;
+      segment404Count?: number;
+      playlistWindow?: string;
+      rewrittenWindow?: string;
       recentRequests: ScreenStreamRequestLog[];
     }>;
   };

@@ -58,6 +58,8 @@ export type ScreenStreamOptions = {
   resolution: ScreenStreamResolution;
   fps: ScreenStreamFps;
   bitrateMbps: ScreenStreamBitrateMbps;
+  hlsStartBufferSegments: 1 | 2 | 3;
+  rewritePlaylist: boolean;
 };
 
 export type ScreenStreamSession = {

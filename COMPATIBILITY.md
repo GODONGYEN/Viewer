@@ -4,9 +4,9 @@ Use this file to record real TV test results. Do not include private Wi-Fi passw
 
 ## Template
 
-| Vendor | Model | Firmware | Detection | Protocols | Custom Receiver Launch | WebRTC ICE | WebRTC Latency | Default Receiver | Chromecast LOAD | WebM Stream | HLS Stream | HLS Latency | Preset | ffmpeg Speed | CPU/Heat | Quality | DLNA Play | AirPlay Flow | Miracast Flow | Failure Log | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Example | Example TV | 1.0.0 | mDNS + SSDP | Chromecast, DLNA | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Low Latency | Unknown | Warm/OK | 720p/15fps/2Mbps | Unknown | N/A | N/A | Paste timeline summary | Same Wi-Fi, no guest network |
+| Vendor | Model | Firmware | Detection | Protocols | Default Receiver | Chromecast LOAD | HLS Stream | HLS Preset | HLS Start Buffer | Playlist Rewrite | Segment Lag | HLS 404 Count | HLS Latency | ffmpeg Speed | CPU/Heat | Quality | WebM Stream | Custom Receiver Launch | WebRTC ICE | WebRTC Latency | DLNA Play | AirPlay Flow | Miracast Flow | Failure Log | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Example | Example TV | 1.0.0 | mDNS + SSDP | Chromecast, DLNA | Success | Success | Success | Low Latency | 2 segments | ON | 1-3 | 0 | 4-6s | 1.0x+ | Warm/OK | 720p/15fps/2Mbps | Unknown | Unknown | Unknown | Unknown | Unknown | N/A | N/A | Paste timeline summary | Same Wi-Fi, no guest network |
 
 ## What To Record
 
@@ -21,7 +21,11 @@ Use this file to record real TV test results. Do not include private Wi-Fi passw
 - Chromecast media LOAD result
 - Chromecast WebM screen stream result
 - Chromecast HLS screen stream result
-- Selected preset: Low Latency, Balanced, or Low CPU
+- Selected HLS preset: Experimental ULL-HLS, Low Latency, Balanced, or Low CPU
+- HLS start buffer: 1, 2, or 3 segments
+- Playlist rewrite: ON or OFF
+- Segment lag from stream diagnostics
+- 404 segment request count
 - Approximate latency and selected quality
 - ffmpeg speed from stream diagnostics
 - CPU/heat notes such as cool, warm, hot, throttling suspected

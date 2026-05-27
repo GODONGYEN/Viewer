@@ -8,7 +8,7 @@ import { URL } from "node:url";
 import ffmpegPath from "ffmpeg-static";
 import { getBestLocalIp } from "./mediaServer";
 import { ScreenStreamOptions } from "../shared/tvConnectionTypes";
-import { getScreenStreamTuning, parseFfmpegSpeed, shouldWarnForSlowEncoding } from "../shared/screenStreamTuning";
+import { getScreenStreamTuning, parseFfmpegSpeed, shouldWarnForSlowEncoding, ScreenStreamTuning } from "../shared/screenStreamTuning";
 
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
 
@@ -24,6 +24,13 @@ type HlsSession = {
   firstSegmentAt?: number;
   firstPlaylistRequestAt?: number;
   firstSegmentRequestAt?: number;
+  tuning: ScreenStreamTuning;
+  latestGeneratedSegment?: number;
+  latestRequestedSegment?: number;
+  segment404Count: number;
+  stdinBackpressureCount: number;
+  lastPlaylistWindow?: string;
+  lastRewrittenWindow?: string;
   requestLog: StreamHttpRequestLog[];
 };
 
@@ -35,6 +42,16 @@ export type StreamHttpRequestLog = {
   userAgent?: string;
   message?: string;
   file?: string;
+  segmentNumber?: number;
+};
+
+type PlaylistInfo = {
+  originalWindow?: string;
+  rewrittenWindow?: string;
+  latestSegment?: number;
+  mediaSequence?: number;
+  segmentNumbers: number[];
+  text: string;
 };
 
 let server: http.Server | null = null;
@@ -58,6 +75,73 @@ function pushRequestLog(streamId: string, log: Omit<StreamHttpRequestLog, "times
   target.unshift(entry);
   target.splice(20);
   return entry;
+}
+
+function noCacheHeaders(contentType: string) {
+  return {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+    "Access-Control-Allow-Origin": "*",
+    "Accept-Ranges": "none"
+  };
+}
+
+export function extractSegmentNumber(file: string) {
+  const match = file.match(/segment-(\d+)\.(?:ts|m4s)$/);
+  return match ? Number(match[1]) : null;
+}
+
+export function parsePlaylistWindow(playlist: string) {
+  const mediaSequenceMatch = playlist.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/);
+  const mediaSequence = mediaSequenceMatch ? Number(mediaSequenceMatch[1]) : 0;
+  const segmentNumbers = [...playlist.matchAll(/segment-(\d+)\.(?:ts|m4s)/g)].map((match) => Number(match[1]));
+  return {
+    mediaSequence,
+    segmentNumbers,
+    originalWindow: segmentNumbers.length ? `${segmentNumbers[0]}-${segmentNumbers[segmentNumbers.length - 1]}` : undefined,
+    latestSegment: segmentNumbers.at(-1)
+  };
+}
+
+export function rewritePlaylistToLatestSegments(playlist: string, count: number): PlaylistInfo {
+  const lines = playlist.split(/\r?\n/).filter((line) => line.trim() !== "#EXT-X-ENDLIST");
+  const groups: string[][] = [];
+  const header: string[] = [];
+  let pending: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("#EXTINF") || line.startsWith("#EXT-X-PROGRAM-DATE-TIME")) {
+      pending.push(line);
+      continue;
+    }
+    if (/segment-\d+\.(?:ts|m4s)/.test(line)) {
+      groups.push([...pending, line]);
+      pending = [];
+      continue;
+    }
+    if (!line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
+      header.push(line);
+    }
+  }
+
+  const selected = groups.slice(-count);
+  const segmentNumbers = selected
+    .flat()
+    .map(extractSegmentNumber)
+    .filter((value): value is number => typeof value === "number");
+  const first = segmentNumbers[0] ?? 0;
+  const original = parsePlaylistWindow(playlist);
+  const text = [...header, `#EXT-X-MEDIA-SEQUENCE:${first}`, ...selected.flat(), ""].join("\n");
+  return {
+    originalWindow: original.originalWindow,
+    rewrittenWindow: segmentNumbers.length ? `${segmentNumbers[0]}-${segmentNumbers[segmentNumbers.length - 1]}` : undefined,
+    latestSegment: segmentNumbers.at(-1),
+    mediaSequence: first,
+    segmentNumbers,
+    text
+  };
 }
 
 async function ensureHlsServer() {
@@ -90,8 +174,10 @@ async function ensureHlsServer() {
     const requestedFile = path.basename(match[2]);
     const filePath = path.join(session.directory, requestedFile);
     if (!fs.existsSync(filePath)) {
-      pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, file: requestedFile, userAgent: request.headers["user-agent"]?.slice(0, 120), message: "file not ready" });
-      emitHlsEvent(session.id, "stream-http-404", "HLS 파일이 아직 준비되지 않았습니다.", { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, file: requestedFile });
+      const segmentNumber = extractSegmentNumber(requestedFile) ?? undefined;
+      if (segmentNumber !== undefined) session.segment404Count += 1;
+      pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, file: requestedFile, segmentNumber, userAgent: request.headers["user-agent"]?.slice(0, 120), message: "file not ready" });
+      emitHlsEvent(session.id, "stream-http-404", "HLS 파일이 아직 준비되지 않았습니다.", { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, file: requestedFile, segmentNumber, segment404Count: session.segment404Count });
       response.writeHead(404, { "Access-Control-Allow-Origin": "*" });
       response.end("HLS segment not ready");
       return;
@@ -102,20 +188,66 @@ async function ensureHlsServer() {
       session.firstPlaylistRequestAt ??= Date.now();
     } else if (requestedFile.endsWith(".ts") || requestedFile.endsWith(".m4s")) {
       session.firstSegmentRequestAt ??= Date.now();
+      session.latestRequestedSegment = extractSegmentNumber(requestedFile) ?? session.latestRequestedSegment;
     }
-    pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 200, file: requestedFile, userAgent: request.headers["user-agent"]?.slice(0, 120), message: requestedFile.endsWith(".m3u8") ? "playlist requested" : "segment requested" });
+    const segmentNumber = extractSegmentNumber(requestedFile) ?? undefined;
+    pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 200, file: requestedFile, segmentNumber, userAgent: request.headers["user-agent"]?.slice(0, 120), message: requestedFile.endsWith(".m3u8") ? "playlist requested" : "segment requested" });
     emitHlsEvent(session.id, requestedFile.endsWith(".m3u8") ? "chromecast-requested-playlist" : "chromecast-requested-segment", "Chromecast 또는 클라이언트가 HLS 파일을 요청했습니다.", {
       method: request.method ?? "GET",
       path: requestUrl.pathname,
       status: 200,
       file: requestedFile,
+      segmentNumber,
+      latestGeneratedSegment: session.latestGeneratedSegment,
+      segmentLag: typeof session.latestGeneratedSegment === "number" && typeof session.latestRequestedSegment === "number" ? session.latestGeneratedSegment - session.latestRequestedSegment : undefined,
       userAgent: request.headers["user-agent"]?.slice(0, 120)
     });
 
+    if (requestedFile.endsWith(".m3u8")) {
+      const original = fs.readFileSync(filePath, "utf8");
+      const playlist = session.tuning.rewritePlaylist ? rewritePlaylistToLatestSegments(original, session.tuning.hlsListSize) : { ...parsePlaylistWindow(original), text: original };
+      session.lastPlaylistWindow = playlist.originalWindow;
+      session.lastRewrittenWindow = playlist.rewrittenWindow ?? playlist.originalWindow;
+      session.latestGeneratedSegment = playlist.latestSegment ?? session.latestGeneratedSegment;
+      emitHlsEvent(session.id, "playlist-window", "HLS playlist window를 기록했습니다.", {
+        originalWindow: playlist.originalWindow,
+        rewrittenWindow: playlist.rewrittenWindow,
+        latestSegment: playlist.latestSegment,
+        mediaSequence: playlist.mediaSequence,
+        rewritePlaylist: session.tuning.rewritePlaylist
+      });
+      response.writeHead(200, noCacheHeaders(contentType));
+      response.end(request.method === "HEAD" ? undefined : playlist.text);
+      return;
+    }
+
+    const stat = fs.statSync(filePath);
+    const range = request.headers.range;
+    if (range) {
+      const matchRange = range.match(/bytes=(\d+)-(\d*)/);
+      const start = matchRange ? Number(matchRange[1]) : 0;
+      const end = matchRange?.[2] ? Number(matchRange[2]) : stat.size - 1;
+      response.writeHead(206, {
+        "Content-Type": contentType,
+        "Content-Length": Math.max(0, end - start + 1),
+        "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+        "Accept-Ranges": "bytes"
+      });
+      if (request.method === "HEAD") {
+        response.end();
+        return;
+      }
+      fs.createReadStream(filePath, { start, end }).pipe(response);
+      return;
+    }
     response.writeHead(200, {
       "Content-Type": contentType,
+      "Content-Length": stat.size,
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      "Accept-Ranges": "bytes"
     });
     if (request.method === "HEAD") {
       response.end();
@@ -149,7 +281,7 @@ export async function startHlsScreenStream(targetIp: string | undefined, options
   const tuning = getScreenStreamTuning(options);
   const child = spawn(ffmpegPath, buildHlsFfmpegArgs(options, playlistPath, segmentPattern));
 
-  const session: HlsSession = { id, directory, process: child, startedAt: Date.now(), requestLog: [] };
+  const session: HlsSession = { id, directory, process: child, startedAt: Date.now(), tuning, requestLog: [], segment404Count: 0, stdinBackpressureCount: 0 };
   sessions.set(id, session);
   child.stderr.on("data", (chunk) => {
     const output = chunk.toString("utf8").trim();
@@ -177,7 +309,7 @@ export async function startHlsScreenStream(targetIp: string | undefined, options
     id,
     strategy: "hls" as const,
     contentType: "application/vnd.apple.mpegurl",
-    url: `http://${getBestLocalIp(targetIp)}:${port}/hls/${id}/index.m3u8`,
+    url: `http://${getBestLocalIp(targetIp)}:${port}/hls/${id}/index.m3u8?session=${id}&start=${Date.now()}`,
     tuning
   };
 }
@@ -187,6 +319,8 @@ export function buildHlsFfmpegArgs(options: ScreenStreamOptions, playlistPath: s
   const scale = `scale=-2:${tuning.targetHeight}`;
   const fps = String(tuning.fps);
   const bitrate = `${tuning.bitrateMbps}M`;
+  const flags = ["delete_segments", "omit_endlist", "independent_segments"];
+  if (tuning.preset !== "low-cpu") flags.push("split_by_time");
   return [
     "-hide_banner",
     "-loglevel",
@@ -234,7 +368,9 @@ export function buildHlsFfmpegArgs(options: ScreenStreamOptions, playlistPath: s
     "-hls_list_size",
     String(tuning.hlsListSize),
     "-hls_flags",
-    "delete_segments+append_list+omit_endlist+independent_segments+split_by_time",
+    flags.join("+"),
+    "-hls_delete_threshold",
+    tuning.preset === "experimental-ull-hls" ? "1" : "2",
     "-start_number",
     "0",
     "-hls_segment_filename",
@@ -257,8 +393,12 @@ export function pushHlsScreenStreamChunk(streamId: string, chunk: Buffer) {
     throw new Error("활성 HLS 화면 스트림을 찾을 수 없습니다.");
   }
 
-  session.process.stdin.write(chunk);
-  return { ok: true };
+  const ok = session.process.stdin.write(chunk);
+  if (!ok) {
+    session.stdinBackpressureCount += 1;
+    emitHlsEvent(streamId, "hls-stdin-backpressure", "ffmpeg stdin backpressure가 발생했습니다.", { stdinBackpressureCount: session.stdinBackpressureCount });
+  }
+  return { ok: true, backpressure: !ok };
 }
 
 export function getHlsReadyState(streamId: string) {
@@ -267,6 +407,8 @@ export function getHlsReadyState(streamId: string) {
   const files = fs.existsSync(session.directory) ? fs.readdirSync(session.directory) : [];
   const firstPlaylist = files.includes("index.m3u8") ? fs.statSync(path.join(session.directory, "index.m3u8")).mtimeMs : undefined;
   const segmentFiles = files.filter((file) => file.endsWith(".ts") || file.endsWith(".m4s"));
+  const segmentNumbers = segmentFiles.map(extractSegmentNumber).filter((value): value is number => typeof value === "number");
+  session.latestGeneratedSegment = segmentNumbers.length ? Math.max(...segmentNumbers) : session.latestGeneratedSegment;
   const firstSegment = segmentFiles.length ? Math.min(...segmentFiles.map((file) => fs.statSync(path.join(session.directory, file)).mtimeMs)) : undefined;
   if (firstPlaylist) session.firstPlaylistAt ??= firstPlaylist;
   if (firstSegment) session.firstSegmentAt ??= firstSegment;
@@ -283,6 +425,14 @@ export function getHlsReadyState(streamId: string) {
     firstPlaylistRequestAt: session.firstPlaylistRequestAt,
     firstSegmentRequestAt: session.firstSegmentRequestAt,
     estimatedLatencySeconds: session.firstSegmentRequestAt && session.startedAt ? Math.round(((session.firstSegmentRequestAt - session.startedAt) / 1000) * 10) / 10 : undefined
+    ,
+    latestGeneratedSegment: session.latestGeneratedSegment,
+    latestRequestedSegment: session.latestRequestedSegment,
+    segmentLag: typeof session.latestGeneratedSegment === "number" && typeof session.latestRequestedSegment === "number" ? session.latestGeneratedSegment - session.latestRequestedSegment : undefined,
+    segment404Count: session.segment404Count,
+    stdinBackpressureCount: session.stdinBackpressureCount,
+    playlistWindow: session.lastPlaylistWindow,
+    rewrittenWindow: session.lastRewrittenWindow
   };
 }
 
@@ -303,6 +453,13 @@ export function getHlsScreenStreamDiagnostics(streamIds?: string[]) {
       ffmpegSpeed: readyState.ffmpegSpeed,
       slowEncodingWarning: readyState.slowEncodingWarning,
       estimatedLatencySeconds: readyState.estimatedLatencySeconds,
+      latestGeneratedSegment: readyState.latestGeneratedSegment,
+      latestRequestedSegment: readyState.latestRequestedSegment,
+      segmentLag: readyState.segmentLag,
+      segment404Count: readyState.segment404Count,
+      stdinBackpressureCount: readyState.stdinBackpressureCount,
+      playlistWindow: readyState.playlistWindow,
+      rewrittenWindow: readyState.rewrittenWindow,
       firstPlaylistAt: readyState.firstPlaylistAt,
       firstSegmentAt: readyState.firstSegmentAt,
       firstPlaylistRequestAt: readyState.firstPlaylistRequestAt,
@@ -316,8 +473,10 @@ export async function waitForHlsReady(streamId: string, timeoutMs = 15000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const state = getHlsReadyState(streamId);
-    if (state.playlistReady && state.segmentReady) {
-      emitHlsEvent(streamId, "hls-ready", "HLS playlist와 첫 segment가 준비되었습니다.", { segmentCount: state.segmentCount });
+    const session = sessions.get(streamId);
+    const targetSegments = session?.tuning.hlsStartBufferSegments ?? 2;
+    if (state.playlistReady && state.segmentReady && (state.segmentCount ?? 0) >= targetSegments) {
+      emitHlsEvent(streamId, "hls-ready", "HLS initial segments가 준비되었습니다.", { segmentCount: state.segmentCount, targetSegments, latestGeneratedSegment: state.latestGeneratedSegment });
       return state;
     }
     if (!state.exists) {
