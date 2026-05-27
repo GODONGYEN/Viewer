@@ -14,6 +14,16 @@ type StreamSession = {
   chunks: Buffer[];
   totalBytes: number;
   startedAt: number;
+  requestLog: StreamHttpRequestLog[];
+};
+
+export type StreamHttpRequestLog = {
+  timestamp: number;
+  method: string;
+  path: string;
+  status: number;
+  userAgent?: string;
+  message?: string;
 };
 
 let server: http.Server | null = null;
@@ -21,6 +31,7 @@ let port = 0;
 const sessions = new Map<string, StreamSession>();
 const readyWaiters = new Map<string, Array<() => void>>();
 let eventSink: ((event: { streamId: string; type: string; message: string; details?: Record<string, string | number | boolean | undefined> }) => void) | null = null;
+const orphanRequestLog: StreamHttpRequestLog[] = [];
 
 export function setScreenStreamEventSink(sink: typeof eventSink) {
   eventSink = sink;
@@ -28,6 +39,15 @@ export function setScreenStreamEventSink(sink: typeof eventSink) {
 
 function emitStreamEvent(streamId: string, type: string, message: string, details?: Record<string, string | number | boolean | undefined>) {
   eventSink?.({ streamId, type, message, details });
+}
+
+function pushRequestLog(streamId: string, log: Omit<StreamHttpRequestLog, "timestamp">) {
+  const entry = { ...log, timestamp: Date.now() };
+  const session = sessions.get(streamId);
+  const target = session?.requestLog ?? orphanRequestLog;
+  target.unshift(entry);
+  target.splice(20);
+  return entry;
 }
 
 async function ensureScreenStreamServer() {
@@ -50,12 +70,14 @@ async function ensureScreenStreamServer() {
 
     const session = sessions.get(match[1]);
     if (!session) {
+      pushRequestLog(match[1], { method: request.method ?? "GET", path: requestUrl.pathname, status: 404, userAgent: request.headers["user-agent"]?.slice(0, 120), message: "session not found" });
       emitStreamEvent(match[1], "stream-http-404", "WebM stream session을 찾지 못했습니다.", { method: request.method ?? "GET", path: requestUrl.pathname, status: 404 });
       response.writeHead(404);
       response.end("Screen stream not found");
       return;
     }
 
+    pushRequestLog(session.id, { method: request.method ?? "GET", path: requestUrl.pathname, status: 200, userAgent: request.headers["user-agent"]?.slice(0, 120), message: "WebM stream requested" });
     emitStreamEvent(session.id, "webm-client-connected", "Chromecast 또는 클라이언트가 WebM stream URL을 요청했습니다.", {
       method: request.method ?? "GET",
       path: requestUrl.pathname,
@@ -113,13 +135,41 @@ async function ensureScreenStreamServer() {
 export async function startScreenStream(targetIp: string | undefined, contentType: string) {
   await ensureScreenStreamServer();
   const id = randomUUID();
-  sessions.set(id, { id, contentType, clients: new Set(), initChunk: null, chunks: [], totalBytes: 0, startedAt: Date.now() });
+  sessions.set(id, { id, contentType, clients: new Set(), initChunk: null, chunks: [], totalBytes: 0, startedAt: Date.now(), requestLog: [] });
   return {
     id,
     contentType,
     strategy: "webm" as const,
     url: `http://${getBestLocalIp(targetIp)}:${port}/screen-stream/${id}/live.webm`
   };
+}
+
+export function verifyScreenStreamUrl(url: string) {
+  return fetch(url, { method: "HEAD" }).then((response) => {
+    if (!response.ok) {
+      throw new Error(`WebM stream URL health check 실패: HTTP ${response.status}`);
+    }
+    return true;
+  });
+}
+
+export function getScreenStreamDiagnostics(streamIds?: string[]) {
+  const ids = streamIds?.length ? streamIds : [...sessions.keys()];
+  return ids.map((id) => {
+    const session = sessions.get(id);
+    return {
+      id,
+      strategy: "webm" as const,
+      exists: Boolean(session),
+      contentType: session?.contentType,
+      startedAt: session?.startedAt,
+      initChunkReady: Boolean(session?.initChunk),
+      queuedChunks: session?.chunks.length ?? 0,
+      totalBytes: session?.totalBytes ?? 0,
+      clients: session?.clients.size ?? 0,
+      recentRequests: session?.requestLog ?? orphanRequestLog.filter((entry) => entry.path.includes(id)).slice(0, 20)
+    };
+  });
 }
 
 export function hasScreenStream(streamId: string) {

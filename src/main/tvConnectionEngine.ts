@@ -1,7 +1,7 @@
 import { BrowserWindow, dialog, ipcMain } from "electron";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { TVConnectionStartRequestSchema } from "../shared/tvConnectionSchemas";
+import { CastWebRtcSignalRequestSchema, TVConnectionStartRequestSchema } from "../shared/tvConnectionSchemas";
 import { getTvConnectorPlan } from "../shared/tvConnectionPlan";
 import {
   DLNAMediaSelection,
@@ -12,13 +12,14 @@ import {
 } from "../shared/tvConnectionTypes";
 import { TVDevice } from "../shared/tvTypes";
 import { getMediaTypeForPath, stopMediaServer } from "./mediaServer";
-import { hasScreenStream, pushScreenStreamChunk, setScreenStreamEventSink, startScreenStream, stopAllScreenStreams, stopScreenStream } from "./screenStreamServer";
-import { hasHlsScreenStream, pushHlsScreenStreamChunk, setHlsStreamEventSink, startHlsScreenStream, stopAllHlsScreenStreams, stopHlsScreenStream } from "./hlsScreenStreamServer";
+import { getScreenStreamDiagnostics, hasScreenStream, pushScreenStreamChunk, setScreenStreamEventSink, startScreenStream, stopAllScreenStreams, stopScreenStream } from "./screenStreamServer";
+import { getHlsScreenStreamDiagnostics, hasHlsScreenStream, pushHlsScreenStreamChunk, setHlsStreamEventSink, startHlsScreenStream, stopAllHlsScreenStreams, stopHlsScreenStream } from "./hlsScreenStreamServer";
 import { airplayConnector } from "./connectors/airplayConnector";
 import { chromecastConnector } from "./connectors/chromecastConnector";
 import { dlnaConnector } from "./connectors/dlnaConnector";
 import { miracastConnector } from "./connectors/miracastConnector";
 import { TVConnector } from "./connectors/types";
+import { sendChromecastWebRtcSignal } from "./connectors/chromecastConnector";
 
 const CONNECTORS: TVConnector[] = [chromecastConnector, airplayConnector, dlnaConnector, miracastConnector];
 const MEDIA_EXTENSIONS = ["mp4", "m4v", "mov", "mp3", "jpg", "jpeg", "png"];
@@ -167,12 +168,12 @@ export function setupTvConnectionIpc(window: BrowserWindow) {
   ipcMain.handle("tv-connection:select-dlna-media", () => selectDlnaMediaFile());
   ipcMain.handle(
     "tv-connection:screen-stream-start",
-    async (_event, payload: { targetIp?: string; deviceId?: string; contentType?: string; strategy?: "webm" | "hls"; options?: { strategy: "auto" | "webm" | "hls"; resolution: "720p" | "1080p"; fps: 15 | 30; bitrateMbps: 2 | 4 | 6 } }) => {
+    async (_event, payload: { targetIp?: string; deviceId?: string; contentType?: string; strategy?: "webm" | "hls"; options?: { strategy: "auto" | "webm" | "hls"; preset: "experimental-ull-hls" | "balanced" | "low-latency" | "low-cpu"; resolution: "540p" | "720p" | "1080p"; fps: 10 | 15 | 30; bitrateMbps: 1 | 2 | 4 | 6; hlsStartBufferSegments: 1 | 2 | 3; rewritePlaylist: boolean } }) => {
     if (!payload?.contentType?.startsWith("video/webm")) {
       return { ok: false, message: "현재 화면 스트림 실험은 video/webm MediaRecorder 출력만 지원합니다." };
     }
       const strategy = payload.strategy ?? "webm";
-      const options = payload.options ?? { strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 4 };
+      const options = payload.options ?? { strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2, hlsStartBufferSegments: 2, rewritePlaylist: true };
       const session = strategy === "hls" ? await startHlsScreenStream(payload.targetIp, options) : await startScreenStream(payload.targetIp, payload.contentType);
       sendEvent({
         connectionId: session.id,
@@ -202,6 +203,16 @@ export function setupTvConnectionIpc(window: BrowserWindow) {
     stopScreenStream(streamId);
     stopHlsScreenStream(streamId);
     return { ok: true };
+  });
+  ipcMain.handle("tv-connection:screen-stream-diagnostics", (_event, payload: { streamIds?: string[] } | undefined) => ({
+    ok: true,
+    webm: getScreenStreamDiagnostics(payload?.streamIds),
+    hls: getHlsScreenStreamDiagnostics(payload?.streamIds)
+  }));
+  ipcMain.handle("tv-connection:webrtc-signal", (_event, payload: unknown) => {
+    const parsed = CastWebRtcSignalRequestSchema.safeParse(payload);
+    if (!parsed.success) return { ok: false, message: "잘못된 WebRTC signaling 메시지입니다." };
+    return sendChromecastWebRtcSignal(parsed.data.connectionId, parsed.data.message);
   });
   ipcMain.handle("tv-connection:stop-all", async () => {
     for (const connectionId of activeConnections.keys()) {

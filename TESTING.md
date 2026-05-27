@@ -133,13 +133,103 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 4. 타임라인에서 Cast V2 TLS 연결, `GET_STATUS`, Default Media Receiver `LAUNCH` 단계를 확인합니다.
 5. `테스트 미디어 재생`을 누르고 mp4, m4v, mov, mp3, jpg, png 중 하나를 선택합니다.
 6. 타임라인에서 media server 시작, Chromecast `LOAD`, media status 수신 여부를 확인합니다.
-7. `Chromecast 화면 스트림 옵션`에서 기본값 `Auto(HLS 우선) / 720p / 15fps / 2 Mbps`를 확인합니다.
+7. `Chromecast 화면 스트림 옵션`에서 기본값 `Low Latency / Auto(HLS 우선) / 720p / 15fps / 2 Mbps`를 확인합니다.
 8. `Chromecast 화면 스트림 시작` 또는 `화면 스트림 캐스팅 실험`을 누르고 OS 화면 선택 권한을 직접 허용합니다.
 9. HLS playlist와 첫 segment 준비 후 Chromecast에 `LOAD` 되는지 확인합니다.
 10. TV에서 5초 이상 화면이 표시되면 성공으로 기록합니다.
 11. Auto에서 HLS가 실패하면 WebM 전략으로 자동 재시도되는지 타임라인을 확인합니다.
 12. WebM 단독 테스트는 방식 옵션을 `WebM live`로 바꾸고 다시 시도합니다.
 13. `화면 스트림 중지` 또는 `Cast 중지`를 눌렀을 때 캡처, MediaRecorder, stream server, Chromecast STOP이 정리되는지 확인합니다.
+14. 화면이 TV에 나오지 않으면 `스트림 URL 진단`을 누릅니다.
+15. HLS는 `playlist OK`와 `segment OK`가 표시되어야 합니다.
+16. WebM은 `init OK`와 queued chunks 증가가 표시되어야 합니다.
+17. 최근 HTTP 요청에 Chromecast의 `index.m3u8`, segment, 또는 `live.webm` 요청이 남는지 확인합니다.
+18. 타임라인에서 `MEDIA_STATUS initial`, `MEDIA_STATUS follow-up`, `MEDIA_STATUS timeout` 중 어떤 상태가 기록됐는지 확인합니다.
+
+### Chromecast 지연 시간과 CPU 테스트
+
+1. `Low Latency` preset으로 시작합니다.
+2. 노트북 화면에서 초 단위 시계나 타이머를 띄우고 TV 화면과 비교합니다.
+3. `스트림 URL 진단`에서 estimated latency, ffmpeg speed, HLS segment count를 확인합니다.
+4. 성공 기준은 TV에 화면이 5초 이상 안정적으로 표시되고, Low Latency에서 체감 지연이 2~5초 범위에 들어오는 것입니다.
+5. ffmpeg speed가 `0.9x` 아래로 5초 이상 내려가거나 MacBook 발열이 심하면 `Low CPU로 재시작`을 누릅니다.
+6. Low CPU에서는 540p / 10fps / 1 Mbps로 동작하므로 화질은 낮지만 발열과 인코딩 부하가 줄어야 합니다.
+7. Activity Monitor에서 Electron/ffmpeg CPU 사용률을 함께 확인합니다.
+8. TV가 짧은 HLS playlist를 불안정하게 처리하면 `Balanced` preset으로 다시 테스트합니다.
+
+### HLS 16초 지연 줄이기 테스트
+
+이번 최적화는 WebRTC 우회가 아니라 Default Media Receiver HLS 경로 자체를 줄이는 테스트입니다.
+
+1. Chromecast TV를 선택합니다.
+2. Stream Mode를 `Stable HLS`로 둡니다.
+3. Preset을 `Low Latency`로 선택합니다.
+4. 방식은 `HLS fallback` 또는 `Auto(HLS 우선)`을 선택합니다.
+5. `HLS start buffer`를 `2 segments`로 둡니다.
+6. `Playlist rewrite`를 `Latest window ON`으로 둡니다.
+7. `HLS 시작`을 누르고 화면/창을 직접 선택합니다.
+8. TV에 화면이 나오면 `스트림 URL 진단`을 눌러 다음 값을 기록합니다.
+   - playlist window
+   - rewritten window
+   - generated latest segment
+   - requested latest segment
+   - segment lag
+   - 404 count
+   - ffmpeg speed
+9. segment lag가 1~3이고 로딩이 줄면 성공 후보입니다.
+10. 지연이 여전히 크면 start buffer를 `1 segment`로 바꿔 재시작합니다.
+11. 로딩이 잦거나 404 segment 요청이 증가하면 start buffer를 `2` 또는 `3 segments`로 되돌리고 `Balanced` preset을 테스트합니다.
+12. 더 낮은 지연을 시험하려면 `ULL-HLS 시작`을 누릅니다. ULL-HLS는 0.5초 segment를 쓰므로 TV에 따라 로딩이 늘 수 있습니다.
+13. ffmpeg speed가 `0.8x` 아래로 떨어지면 CPU가 인코딩을 따라가지 못하는 상태입니다. `Low CPU로 재시작`을 테스트합니다.
+
+성공 기준:
+
+- TV 화면이 5초 이상 안정적으로 표시됩니다.
+- 지연이 기존 16초보다 줄어듭니다.
+- Low Latency HLS에서 segment lag가 1~3 근처로 유지됩니다.
+- `stream-http-404`가 반복되지 않습니다.
+- `MEDIA_STATUS follow-up`이 `PLAYING`으로 기록됩니다.
+
+### HLS playlist rewrite ON/OFF 비교
+
+1. 같은 TV와 같은 화면으로 `Low Latency` preset을 사용합니다.
+2. `Playlist rewrite ON`으로 1분 테스트합니다.
+3. `최근 30초 진단 로그` 또는 실패 로그를 복사합니다.
+4. `Playlist rewrite OFF`로 다시 시작합니다.
+5. TV가 요청한 segment 번호와 최신 generated segment 번호를 비교합니다.
+6. ON에서 segment lag가 더 낮고 404가 없다면 ON을 권장 설정으로 기록합니다.
+7. ON에서 로딩이 심하면 TV가 너무 짧은 window를 싫어할 수 있으므로 `Balanced` 또는 start buffer 3을 테스트합니다.
+
+### 로딩이 자주 발생할 때 확인할 것
+
+- `stream-http-404`가 늘어나면 TV가 삭제된 segment를 요청하고 있을 수 있습니다.
+- `segment lag`가 8 이상이면 TV가 오래된 segment를 따라오고 있을 수 있습니다.
+- playlist 요청은 있는데 segment 요청이 없으면 content type, playlist rewrite 형식, cache header를 확인합니다.
+- ffmpeg speed가 `0.9x` 아래면 Low CPU preset을 테스트합니다.
+- `rewritten window`가 너무 좁아 보이면 playlist size가 3인 Balanced preset을 테스트합니다.
+
+### Chromecast Low Latency WebRTC 테스트
+
+1. `receiver/` 폴더를 HTTPS 호스팅에 배포합니다. GitHub Pages, Vercel, Netlify 같은 정적 호스팅을 사용할 수 있습니다.
+2. Google Cast SDK Developer Console에서 Custom Web Receiver를 만들고 배포한 HTTPS URL을 등록합니다.
+3. 발급된 Custom Receiver App ID를 TV Cast 패널의 `Custom Receiver App ID` 입력란에 넣습니다.
+4. `Receiver 연결 테스트`를 눌러 `LAUNCH Custom WebRTC Receiver`, `custom-namespace-connected`, `receiver-ready` 로그가 나오는지 확인합니다.
+5. `Auto로 시작` 또는 `Low Latency로 시작`을 누릅니다.
+6. OS 화면 선택 권한을 직접 허용합니다.
+7. 타임라인에서 `receiver-ready`, `WebRTC offer sent`, `receiver-answer`, `receiver-ice`, `WebRTC connectionState: connected`, `Receiver rendering`을 확인합니다.
+8. 지연 시간은 우선 TV와 노트북에 같은 초 단위 타이머를 띄워 비교합니다. WebRTC 목표는 1~3초입니다.
+9. `ICE failed`, `receiver-ready timeout`, `receiver-error`가 나오면 같은 LAN인지, Chromecast가 Receiver URL에 접근 가능한지, Receiver App ID가 올바른지 확인합니다.
+10. Auto 모드에서 WebRTC가 실패하면 Stable HLS fallback이 시작되는지 확인합니다.
+
+### Custom Receiver 문제 해결
+
+- Receiver URL은 Chromecast가 접근 가능한 HTTPS여야 합니다.
+- App ID가 비어 있으면 Low Latency WebRTC는 시작하지 않고 Auto에서는 Stable HLS로 전환합니다.
+- TV 화면이 검은색이면 receiver page의 status가 `Receiving screen...`인지 확인합니다.
+- `receiver-ready`가 없으면 Custom Receiver launch 또는 namespace 연결 문제입니다.
+- `receiver-answer`가 없으면 receiver page의 WebRTC offer 처리 문제입니다.
+- `ICE failed`는 LAN 라우팅, AP isolation, 방화벽, VPN 문제일 수 있습니다.
+- 이 receiver는 영상 표시 전용입니다. 원격 제어, 보호 콘텐츠 우회, 인증 우회는 지원하지 않습니다.
 
 ### Electron 화면 캡처 fallback 테스트
 
@@ -197,6 +287,9 @@ TV Cast 모드는 주변 TV를 감지한 뒤 프로토콜별 connector로 직접
 - Auto는 HLS를 먼저 시도하고, 실패하면 WebM으로 자동 fallback합니다.
 - HLS 방식은 `ffmpeg-static`으로 변환하므로 CPU 사용량과 4~10초 지연이 생길 수 있습니다.
 - 타임라인에서 `chromecast-requested-playlist`, `chromecast-requested-segment`, `webm-client-connected`, `stream-http-404` 이벤트를 확인합니다.
+- `스트림 URL 진단`에서 최근 HTTP 요청이 비어 있으면 Chromecast가 Mac의 stream URL에 접근하지 못한 것입니다.
+- `MEDIA_STATUS follow-up`이 `PLAYING`이면 Chromecast receiver는 재생 상태를 보고한 것입니다. TV 화면이 비어 있으면 TV 출력/입력 상태를 함께 확인합니다.
+- `MEDIA_STATUS timeout`이면 Chromecast가 URL을 받았지만 재생 가능한 스트림으로 확정하지 못한 상태입니다. HLS segment 생성, codec, 방화벽 로그를 같이 확인합니다.
 - Chromecast media status 오류가 타임라인에 표시되면 content type, codec, stream URL 접근성을 기록합니다.
 - 보호 콘텐츠/DRM 우회 목적의 화면은 테스트하지 않습니다.
 

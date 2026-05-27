@@ -1,4 +1,5 @@
 import { TVDevice, TVProtocol } from "./tvTypes";
+import { ScreenStreamBitrateMbps, ScreenStreamFps, ScreenStreamPreset, ScreenStreamResolution } from "./screenStreamTuning";
 
 export type TVConnectorKind = "chromecast" | "airplay" | "dlna" | "miracast" | "diagnostic";
 
@@ -6,6 +7,7 @@ export type TVConnectionAction =
   | "connect"
   | "cast-test-media"
   | "start-screen-cast-experiment"
+  | "start-webrtc-screen-cast"
   | "play-dlna-media"
   | "airplay-start"
   | "miracast-start";
@@ -43,6 +45,8 @@ export type TVConnectionOptions = {
   mediaFilePath?: string;
   contentType?: string;
   streamType?: "BUFFERED" | "LIVE";
+  screenStreamMode?: "auto" | "webrtc-low-latency" | "hls-stable";
+  customReceiverAppId?: string;
   screenStreamStrategy?: "auto" | "webm" | "hls";
   screenStreamOptions?: ScreenStreamOptions;
   screenStreamSources?: ScreenStreamSource[];
@@ -50,9 +54,12 @@ export type TVConnectionOptions = {
 
 export type ScreenStreamOptions = {
   strategy: "auto" | "webm" | "hls";
-  resolution: "720p" | "1080p";
-  fps: 15 | 30;
-  bitrateMbps: 2 | 4 | 6;
+  preset: ScreenStreamPreset;
+  resolution: ScreenStreamResolution;
+  fps: ScreenStreamFps;
+  bitrateMbps: ScreenStreamBitrateMbps;
+  hlsStartBufferSegments: 1 | 2 | 3;
+  rewritePlaylist: boolean;
 };
 
 export type ScreenStreamSession = {

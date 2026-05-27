@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld("tvConnection", {
   startScreenStream: (payload: unknown) => ipcRenderer.invoke("tv-connection:screen-stream-start", payload),
   pushScreenStreamChunk: (payload: unknown) => ipcRenderer.invoke("tv-connection:screen-stream-push", payload),
   stopScreenStream: (streamId: string) => ipcRenderer.invoke("tv-connection:screen-stream-stop", streamId),
+  getScreenStreamDiagnostics: (payload: unknown) => ipcRenderer.invoke("tv-connection:screen-stream-diagnostics", payload),
+  sendWebRtcSignal: (payload: unknown) => ipcRenderer.invoke("tv-connection:webrtc-signal", payload),
   stopAllConnections: () => ipcRenderer.invoke("tv-connection:stop-all"),
   onConnectionEvent: (callback: (event: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, connectionEvent: unknown) => callback(connectionEvent);

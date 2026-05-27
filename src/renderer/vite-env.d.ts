@@ -106,6 +106,7 @@ declare global {
     | "connect"
     | "cast-test-media"
     | "start-screen-cast-experiment"
+    | "start-webrtc-screen-cast"
     | "play-dlna-media"
     | "airplay-start"
     | "miracast-start";
@@ -140,15 +141,20 @@ declare global {
     mediaFilePath?: string;
     contentType?: string;
     streamType?: "BUFFERED" | "LIVE";
+    screenStreamMode?: "auto" | "webrtc-low-latency" | "hls-stable";
+    customReceiverAppId?: string;
     screenStreamStrategy?: "auto" | "webm" | "hls";
     screenStreamOptions?: ScreenStreamOptions;
     screenStreamSources?: ScreenStreamSource[];
   };
   type ScreenStreamOptions = {
     strategy: "auto" | "webm" | "hls";
-    resolution: "720p" | "1080p";
-    fps: 15 | 30;
-    bitrateMbps: 2 | 4 | 6;
+    preset: "experimental-ull-hls" | "balanced" | "low-latency" | "low-cpu";
+    resolution: "540p" | "720p" | "1080p";
+    fps: 10 | 15 | 30;
+    bitrateMbps: 1 | 2 | 4 | 6;
+    hlsStartBufferSegments: 1 | 2 | 3;
+    rewritePlaylist: boolean;
   };
   type ScreenStreamSession = {
     ok: boolean;
@@ -163,6 +169,54 @@ declare global {
     url: string;
     contentType: string;
     strategy: "webm" | "hls";
+  };
+  type ScreenStreamRequestLog = {
+    timestamp: number;
+    method: string;
+    path: string;
+    status: number;
+    userAgent?: string;
+    message?: string;
+    file?: string;
+  };
+  type ScreenStreamDiagnostics = {
+    ok: boolean;
+    webm: Array<{
+      id: string;
+      strategy: "webm";
+      exists: boolean;
+      contentType?: string;
+      startedAt?: number;
+      initChunkReady: boolean;
+      queuedChunks: number;
+      totalBytes: number;
+      clients: number;
+      recentRequests: ScreenStreamRequestLog[];
+    }>;
+    hls: Array<{
+      id: string;
+      strategy: "hls";
+      exists: boolean;
+      startedAt?: number;
+      playlistReady: boolean;
+      segmentReady: boolean;
+      segmentCount: number;
+      lastError?: string;
+      ffmpegSpeed?: number;
+      slowEncodingWarning?: boolean;
+      estimatedLatencySeconds?: number;
+      firstPlaylistAt?: number;
+      firstSegmentAt?: number;
+      firstPlaylistRequestAt?: number;
+      firstSegmentRequestAt?: number;
+      latestGeneratedSegment?: number;
+      latestRequestedSegment?: number;
+      segmentLag?: number;
+      segment404Count?: number;
+      playlistWindow?: string;
+      rewrittenWindow?: string;
+      recentRequests: ScreenStreamRequestLog[];
+    }>;
   };
   type DLNAMediaSelection = {
     ok: boolean;
@@ -225,6 +279,8 @@ declare global {
       startScreenStream: (payload: { targetIp?: string; deviceId?: string; contentType: string; strategy: "webm" | "hls"; options: ScreenStreamOptions }) => Promise<ScreenStreamSession>;
       pushScreenStreamChunk: (payload: { streamId: string; chunk: ArrayBuffer }) => Promise<{ ok: boolean; message?: string }>;
       stopScreenStream: (streamId: string) => Promise<{ ok: boolean; message?: string }>;
+      getScreenStreamDiagnostics: (payload: { streamIds?: string[] }) => Promise<ScreenStreamDiagnostics>;
+      sendWebRtcSignal: (payload: { connectionId: string; message: Record<string, unknown> }) => Promise<{ ok: boolean; message?: string }>;
       stopAllConnections: () => Promise<{ ok: boolean }>;
       onConnectionEvent: (callback: (event: TVConnectionEvent) => void) => () => void;
     };

@@ -10,13 +10,14 @@ import { getDirectedBroadcast, isPrivateIpv4, isPrivateOrLoopback } from "./netw
 import { mergeTvDevices } from "./tvActions";
 import { DLNAMediaRequestSchema, TVActionRequestSchema, TVDeviceSchema } from "./tvSchemas";
 import { getTvConnectorPlan } from "./tvConnectionPlan";
-import { TVConnectionEventSchema, TVConnectionStartRequestSchema } from "./tvConnectionSchemas";
+import { CastWebRtcSignalRequestSchema, CastWebRtcSignalSchema, TVConnectionEventSchema, TVConnectionStartRequestSchema } from "./tvConnectionSchemas";
 import { buildDidlLiteMetadata, buildSoapEnvelope, extractDlnaAvTransportService } from "../main/connectors/dlnaConnector";
-import { createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
+import { createCustomReceiverLaunchPayload, createMediaLoadPayload, createReceiverLaunchPayload, decodeCastMessage, encodeCastMessage } from "../main/connectors/castV2Client";
 import { getBestLocalIp, getContentTypeForPath, getMediaTypeForPath } from "../main/mediaServer";
-import { chooseScreenStreamMimeType, getScreenStreamLimits } from "../main/screenStreamServer";
-import { getHlsReadyState } from "../main/hlsScreenStreamServer";
+import { chooseScreenStreamMimeType, getScreenStreamDiagnostics, getScreenStreamLimits } from "../main/screenStreamServer";
+import { buildHlsFfmpegArgs, extractSegmentNumber, getHlsReadyState, getHlsScreenStreamDiagnostics, parsePlaylistWindow, rewritePlaylistToLatestSegments } from "../main/hlsScreenStreamServer";
 import { chooseBestRecorderMimeType, getScreenCaptureSupport, isValidCaptureSource, normalizeCaptureError } from "../renderer/screenCapture";
+import { getRecorderTimesliceMs, getScreenStreamTuning, parseFfmpegSpeed, shouldFallbackHlsPreset, shouldWarnForSlowEncoding } from "./screenStreamTuning";
 
 describe("network helpers", () => {
   it("recognizes private IPv4 ranges", () => {
@@ -232,6 +233,7 @@ describe("schema validation", () => {
     expect(decoded.sourceId).toBe("sender-1");
     expect(JSON.parse(decoded.payloadUtf8).type).toBe("GET_STATUS");
     expect(createReceiverLaunchPayload(2)).toMatchObject({ type: "LAUNCH", appId: "CC1AD845", requestId: 2 });
+    expect(createCustomReceiverLaunchPayload(5, "ABCD1234")).toMatchObject({ type: "LAUNCH", appId: "ABCD1234", requestId: 5 });
     expect(createMediaLoadPayload(3, "session", "http://192.168.1.2/media/movie.mp4", "video/mp4")).toMatchObject({
       type: "LOAD",
       media: { streamType: "BUFFERED", contentType: "video/mp4" }
@@ -240,6 +242,16 @@ describe("schema validation", () => {
       type: "LOAD",
       media: { streamType: "LIVE", contentType: "video/webm" }
     });
+  });
+
+  it("validates WebRTC custom receiver signaling messages", () => {
+    expect(CastWebRtcSignalSchema.safeParse({ type: "receiver-ready", timestamp: Date.now() }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "sender-offer", sdp: "v=0" }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "receiver-answer", sdp: "v=0" }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "sender-ice", candidate: null }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "receiver-stats", rendering: true, rttMs: 12 }).success).toBe(true);
+    expect(CastWebRtcSignalSchema.safeParse({ type: "sender-offer" }).success).toBe(false);
+    expect(CastWebRtcSignalRequestSchema.safeParse({ connectionId: "conn", message: { type: "ping", timestamp: Date.now() } }).success).toBe(true);
   });
 
   it("selects a screen stream MIME type", () => {
@@ -268,7 +280,7 @@ describe("schema validation", () => {
           contentType: "video/webm",
           streamType: "LIVE",
           screenStreamStrategy: "auto",
-          screenStreamOptions: { strategy: "auto", resolution: "720p", fps: 15, bitrateMbps: 2 },
+          screenStreamOptions: { strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2, hlsStartBufferSegments: 2, rewritePlaylist: true },
           screenStreamSources: [
             { id: "hls-1", url: "http://192.168.1.2:3000/hls/hls-1/index.m3u8", contentType: "application/vnd.apple.mpegurl", strategy: "hls" },
             { id: "webm-1", url: "http://192.168.1.2:3000/screen-stream/webm-1/live.webm", contentType: "video/webm", strategy: "webm" }
@@ -281,14 +293,104 @@ describe("schema validation", () => {
         device,
         options: {
           action: "start-screen-cast-experiment",
-          screenStreamOptions: { strategy: "auto", resolution: "4k", fps: 60, bitrateMbps: 40 }
+          screenStreamOptions: { strategy: "auto", preset: "fastest", resolution: "4k", fps: 60, bitrateMbps: 40 }
         }
       }).success
     ).toBe(false);
   });
 
+  it("builds screen stream tuning profiles for latency and CPU tradeoffs", () => {
+    expect(getScreenStreamTuning({ preset: "low-latency" })).toMatchObject({
+      resolution: "720p",
+      fps: 15,
+      bitrateMbps: 2,
+      hlsTimeSeconds: 1,
+      hlsListSize: 2,
+      ffmpegPreset: "ultrafast",
+      hlsStartBufferSegments: 2,
+      rewritePlaylist: true
+    });
+    expect(getScreenStreamTuning({ preset: "experimental-ull-hls" })).toMatchObject({
+      hlsTimeSeconds: 0.5,
+      hlsListSize: 3,
+      recorderTimesliceMs: 250,
+      rewritePlaylist: true
+    });
+    expect(getScreenStreamTuning({ preset: "low-cpu" })).toMatchObject({
+      resolution: "540p",
+      fps: 10,
+      bitrateMbps: 1,
+      targetHeight: 540,
+      hlsStartBufferSegments: 3,
+      rewritePlaylist: false
+    });
+    expect(getRecorderTimesliceMs({ preset: "balanced" })).toBe(500);
+  });
+
+  it("builds low latency and low CPU ffmpeg HLS args", () => {
+    const lowLatencyArgs = buildHlsFfmpegArgs({ strategy: "auto", preset: "low-latency", resolution: "720p", fps: 15, bitrateMbps: 2, hlsStartBufferSegments: 2, rewritePlaylist: true }, "/tmp/index.m3u8", "/tmp/segment-%05d.ts");
+    expect(lowLatencyArgs).toContain("ultrafast");
+    expect(lowLatencyArgs.slice(lowLatencyArgs.indexOf("-hls_time") + 1, lowLatencyArgs.indexOf("-hls_time") + 2)).toEqual(["1"]);
+    expect(lowLatencyArgs.slice(lowLatencyArgs.indexOf("-hls_list_size") + 1, lowLatencyArgs.indexOf("-hls_list_size") + 2)).toEqual(["2"]);
+    expect(lowLatencyArgs.slice(lowLatencyArgs.indexOf("-g") + 1, lowLatencyArgs.indexOf("-g") + 2)).toEqual(["15"]);
+    expect(lowLatencyArgs[lowLatencyArgs.indexOf("-hls_flags") + 1]).not.toContain("append_list");
+
+    const lowCpuArgs = buildHlsFfmpegArgs({ strategy: "auto", preset: "low-cpu", resolution: "540p", fps: 10, bitrateMbps: 1, hlsStartBufferSegments: 3, rewritePlaylist: false }, "/tmp/index.m3u8", "/tmp/segment-%05d.ts");
+    expect(lowCpuArgs).toContain("scale=-2:540,fps=10");
+    expect(lowCpuArgs.slice(lowCpuArgs.indexOf("-b:v") + 1, lowCpuArgs.indexOf("-b:v") + 2)).toEqual(["1M"]);
+
+    const ultraArgs = buildHlsFfmpegArgs({ strategy: "hls", preset: "experimental-ull-hls", resolution: "720p", fps: 15, bitrateMbps: 1, hlsStartBufferSegments: 2, rewritePlaylist: true }, "/tmp/index.m3u8", "/tmp/segment-%05d.ts");
+    expect(ultraArgs.slice(ultraArgs.indexOf("-hls_time") + 1, ultraArgs.indexOf("-hls_time") + 2)).toEqual(["0.5"]);
+    expect(ultraArgs.slice(ultraArgs.indexOf("-hls_delete_threshold") + 1, ultraArgs.indexOf("-hls_delete_threshold") + 2)).toEqual(["1"]);
+  });
+
+  it("rewrites HLS playlists to the latest segment window", () => {
+    const playlist = [
+      "#EXTM3U",
+      "#EXT-X-VERSION:3",
+      "#EXT-X-TARGETDURATION:1",
+      "#EXT-X-MEDIA-SEQUENCE:101",
+      "#EXTINF:1.000000,",
+      "segment-00101.ts",
+      "#EXTINF:1.000000,",
+      "segment-00102.ts",
+      "#EXTINF:1.000000,",
+      "segment-00103.ts",
+      "#EXTINF:1.000000,",
+      "segment-00104.ts",
+      "#EXT-X-ENDLIST"
+    ].join("\n");
+
+    expect(extractSegmentNumber("segment-00104.ts")).toBe(104);
+    expect(parsePlaylistWindow(playlist)).toMatchObject({ originalWindow: "101-104", latestSegment: 104 });
+    const rewritten = rewritePlaylistToLatestSegments(playlist, 2);
+    expect(rewritten.originalWindow).toBe("101-104");
+    expect(rewritten.rewrittenWindow).toBe("103-104");
+    expect(rewritten.mediaSequence).toBe(103);
+    expect(rewritten.text).toContain("#EXT-X-MEDIA-SEQUENCE:103");
+    expect(rewritten.text).not.toContain("segment-00101.ts");
+    expect(rewritten.text).not.toContain("#EXT-X-ENDLIST");
+  });
+
+  it("parses ffmpeg speed and reports slow encoding warnings", () => {
+    expect(parseFfmpegSpeed("frame=12 speed=0.82x")).toBe(0.82);
+    expect(parseFfmpegSpeed("speed=1.24x")).toBe(1.24);
+    expect(parseFfmpegSpeed("no speed")).toBeNull();
+    expect(shouldWarnForSlowEncoding(0.75, 6)).toBe(true);
+    expect(shouldWarnForSlowEncoding(0.75, 2)).toBe(false);
+    expect(shouldWarnForSlowEncoding(1.05, 10)).toBe(false);
+    expect(shouldFallbackHlsPreset({ preset: "experimental-ull-hls", segment404Count: 3 })).toBe("low-latency");
+    expect(shouldFallbackHlsPreset({ preset: "low-latency", segment404Count: 0, segmentLag: 9 })).toBe("balanced");
+    expect(shouldFallbackHlsPreset({ preset: "balanced", segment404Count: 0, speed: 0.72 })).toBe("low-cpu");
+  });
+
   it("reports missing HLS sessions as not ready", () => {
     expect(getHlsReadyState("missing-session")).toMatchObject({ exists: false, playlistReady: false, segmentReady: false });
+  });
+
+  it("reports missing stream diagnostics without crashing", () => {
+    expect(getScreenStreamDiagnostics(["missing-webm"])[0]).toMatchObject({ id: "missing-webm", strategy: "webm", exists: false, initChunkReady: false });
+    expect(getHlsScreenStreamDiagnostics(["missing-hls"])[0]).toMatchObject({ id: "missing-hls", strategy: "hls", exists: false, playlistReady: false, segmentReady: false });
   });
 
   it("checks screen capture support without assuming browser APIs", () => {

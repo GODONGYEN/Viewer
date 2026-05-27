@@ -155,6 +155,16 @@ If a Chromecast or Google TV-like device is detected, the app uses a built-in Ca
 
 ### Chromecast Screen Stream
 
+The currently working TV path is `getDisplayMedia` or Electron `desktopCapturer` fallback → `MediaRecorder` → ffmpeg HLS → local LAN HTTP server → Chromecast Default Media Receiver `LOAD`. This mode stays the primary HLS path because it works with the standard Default Media Receiver and does not require a registered custom receiver.
+
+The latest HLS work focuses on reducing delay without replacing the working Cast V2 connection:
+
+- Low Latency HLS removes `append_list` so playlist delay does not accumulate.
+- The HTTP server can rewrite `index.m3u8` to the latest segment window before serving it.
+- Chromecast `LOAD` uses a cache-busted HLS URL for each stream session.
+- The app waits for a configurable initial segment buffer before sending `LOAD`.
+- Stream diagnostics show generated/requested segment numbers, segment lag, 404 counts, ffmpeg speed, and recent Chromecast HTTP requests.
+
 The screen stream flow is:
 
 1. User clicks `Chromecast 화면 스트림 시작`.
@@ -162,10 +172,38 @@ The screen stream flow is:
 3. If that is not supported in the current Electron/Chromium runtime, the app asks the main process for `desktopCapturer` screen/window sources and shows an in-app source picker.
 4. The user explicitly selects a screen/window, then the renderer starts `getUserMedia` with that source ID.
 5. `MediaRecorder` encodes WebM chunks.
-6. The main process serves either a WebM chunked stream or an HLS playlist through the LAN HTTP stream server.
+6. The main process serves either an HLS playlist or a WebM chunked stream through the LAN HTTP stream server.
 7. Chromecast receives a `LOAD` request with `streamType: LIVE`.
 
-Default options are `720p`, `15fps`, `2 Mbps`, and `Auto(HLS first)`. Auto starts HLS and WebM sessions from the same user-approved capture, waits for the HLS playlist and first segment before sending Chromecast `LOAD`, and falls back to WebM if the HLS strategy fails. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility, with a few seconds of latency.
+Default HLS options are `Low Latency`, `720p`, `15fps`, `2 Mbps`, `2 segment start buffer`, and `playlist rewrite ON`. HLS uses `ffmpeg-static` and usually has higher Chromecast compatibility than direct WebM live streaming, but it still has some latency because the TV buffers live media.
+
+Available stream presets:
+
+- `Experimental ULL-HLS`: 720p / 15fps / 1 Mbps, 0.5-second HLS segments, playlist size 3, `ultrafast` x264, latest-window playlist rewrite. It may reduce delay further, but some TVs may buffer more often.
+- `Low Latency`: 720p / 15fps / 2 Mbps, 1-second HLS segments, playlist size 2, `ultrafast` x264.
+- `Balanced`: 720p / 15fps / 2 Mbps, 1-second HLS segments, playlist size 3, `superfast` x264.
+- `Low CPU`: 540p / 10fps / 1 Mbps, 1-second HLS segments, playlist size 3, `ultrafast` x264.
+
+Latency cannot be zero because the pipeline still has capture, encoding, HLS segmenting, LAN transfer, and Chromecast buffering. Use `Low Latency` first, compare `start buffer` values of 1, 2, and 3 segments, and try `Experimental ULL-HLS` when the TV tolerates shorter segments. If the Mac gets hot or diagnostics show ffmpeg speed below `0.9x`, switch to `Low CPU`.
+
+The TV detail panel includes a stream diagnostics view. It shows the generated HLS/WebM URLs, whether HLS playlist and initial segments are ready, playlist windows, rewritten windows, generated/requested segment numbers, segment lag, 404 counts, recent HTTP requests from Chromecast, and Chromecast `MEDIA_STATUS` values such as `BUFFERING`, `PLAYING`, `IDLE`, and `ERROR`.
+
+### Low Latency WebRTC Receiver
+
+Low Latency WebRTC mode is an optional custom receiver experiment and is not required for the HLS Default Media Receiver path. It uses a custom Cast receiver page from the `receiver/` directory:
+
+1. Electron captures the screen only after the user clicks start.
+2. The app launches your registered Custom Receiver App ID.
+3. Cast custom namespace `urn:x-cast:com.godonghyeon.viewer.webrtc` carries WebRTC offer/answer/ICE messages.
+4. The receiver page displays the remote video track directly in a fullscreen `<video>` element.
+5. If receiver launch, signaling, ICE, or rendering fails in Auto mode, the app falls back to Stable HLS.
+
+Custom Receiver requirements:
+
+- Register a Custom Web Receiver in the Google Cast SDK Developer Console.
+- Host `receiver/index.html`, `receiver/receiver.js`, and `receiver/receiver.css` on an HTTPS URL such as GitHub Pages, Vercel, or Netlify.
+- Enter the generated Receiver App ID in the TV Cast panel or set `VITE_CAST_CUSTOM_RECEIVER_APP_ID`.
+- The receiver only displays video. It does not receive keyboard or mouse control events.
 
 ### DLNA Guidance
 
